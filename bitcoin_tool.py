@@ -20,10 +20,22 @@ from btc.hash import sha256, dbl_sha256, sha256_file, dbl_sha256_file, show
 from btc.private_key_gen import generate_32bytes_private_key
 from btc.btc_address_gen import privkey_to_compressed_pubkey, pubkey_to_p2pkh, p2wpkh_bech32_address, p2sh_p2wpkh_address
 
-def cmd_hash(args, parser):
+def cmd_hash(args):
+    parser = args.parser
+    
     if args.string is not None:
         data = args.string.encode("utf-8")
         print("input:", repr(args.string))
+        print()
+        show("SHA256", sha256(data))
+        show("Double-SHA256", dbl_sha256(data))
+        return
+    elif args.hex is not None:
+        try: 
+            data = bytes.fromhex(args.hex)
+        except ValueError:
+            parser.error(f'invalid hex string: "{args.hex}"')
+        print("input:", repr(args.hex))
         print()
         show("SHA256", sha256(data))
         show("Double-SHA256", dbl_sha256(data))
@@ -84,21 +96,19 @@ def cmd_addr(args):
 """
 def main():
     parser = argparse.ArgumentParser(
-        prog="btc_tool",
-        description="BTC research CLI tool: hash / keys / address / scripts"
+        prog="bitcoin_tool",
+        description="Bitcoin research CLI tool: hash / keys / address / scripts"
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     # hash
-    p_hash = sub.add_parser("hash", help="hash a string or a file")
+    p_hash = sub.add_parser("hash", help="hash a ASCII string, hex string or a file")
     g = p_hash.add_mutually_exclusive_group(required=True)
-    g.add_argument("-s", "--string", help="input string")
+    g.add_argument("-s", "--string", help="input ASCII string")
+    g.add_argument("-x", "--hex", help="input hex string")
     g.add_argument("-f", "--file", help="input file path")
-    def run_hash(args):
-        return cmd_hash(args, p_hash)
 
-    p_hash.set_defaults(func=run_hash)
-    #p_hash.set_defaults(func=cmd_hash)
+    p_hash.set_defaults(func=cmd_hash, parser=p_hash)
 
     # gen
     p_gen = sub.add_parser("gen", help="generate random 32-byte private key")
