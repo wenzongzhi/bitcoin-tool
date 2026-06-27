@@ -19,6 +19,7 @@ from pathlib import Path
 from btc.hash import sha256, dbl_sha256, sha256_file, dbl_sha256_file, show
 from btc.private_key_gen import generate_32bytes_private_key
 from btc.btc_address_gen import privkey_to_compressed_pubkey, pubkey_to_p2pkh, p2wpkh_bech32_address, p2sh_p2wpkh_address
+from version import __version__
 
 def cmd_hash(args):
     parser = args.parser
@@ -99,6 +100,13 @@ def main():
         prog="bitcoin_tool",
         description="Bitcoin research CLI tool: hash / keys / address / scripts"
     )
+    
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     # hash
