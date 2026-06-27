@@ -27,6 +27,7 @@ ICON = ROOT / "icon" / "bitcoin_tool.ico"
 ENTRY = ROOT / "bitcoin_tool.py"
 EXE = ROOT / "dist" / "bitcoin_tool.exe"
 SHA256SUMS = ROOT / "dist" / "SHA256SUMS"
+COMMIT_INFO = ROOT / "dist" / "BUILD_INFO.txt"
 
 def git_commit():
     try:
@@ -46,7 +47,7 @@ def sha256_file(path):
     return h.hexdigest()
 
 try:
-    subprocess.check_call([sys.executable, str(CREATE_ICON)])
+    subprocess.check_call([sys.executable, str(CREATE_ICON)], cwd=ROOT)
 
     subprocess.check_call([
         sys.executable, "-m", "PyInstaller",
@@ -55,16 +56,21 @@ try:
         "--onefile",
         "--icon", str(ICON),
         str(ENTRY),
-    ])
+    ], cwd=ROOT)
 
     commit = git_commit()
     digest = sha256_file(EXE)
     
     SHA256SUMS.write_text(
-    f"{digest}  {EXE.name}\ncommit: {commit}\n",
-    encoding="utf-8",
-)
+        f"{digest}  {EXE.name}",
+        encoding="utf-8",
+    )
 
+    COMMIT_INFO.write_text(
+        f"commit: {commit}\n",
+        encoding="utf-8",
+    )
+    
     print("\nBuild finished successfully.")
     print("Commit:", commit)
     print("SHA256:", digest)

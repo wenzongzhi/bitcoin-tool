@@ -17,7 +17,7 @@ limitations under the License.
 import argparse
 from pathlib import Path
 from btc.hash import sha256, dbl_sha256, sha256_file, dbl_sha256_file, show
-from btc.private_key_gen import generate_32bytes_private_key
+from btc.private_key_gen import generate_32bytes_private_key, is_valid_privkey
 from btc.btc_address_gen import privkey_to_compressed_pubkey, pubkey_to_p2pkh, p2wpkh_bech32_address, p2sh_p2wpkh_address
 from version import __version__
 
@@ -65,15 +65,21 @@ def cmd_gen(args):
     print(f"32 Bytes Hex private key:   ", key_hex)
     
 def cmd_addr(args):
-    priv = bytes.fromhex(args.privhex)
+    try:
+        priv = bytes.fromhex(args.privhex)
+    except ValueError:
+        args.parser.error("invalid hex private key")
 
-    pub_c = privkey_to_compressed_pubkey(priv)
-    print()
-    print("compressed pubkey:", pub_c.hex())
+    if not is_valid_privkey(priv):
+        args.parser.error("invalid private key: must be 32 bytes and 1 <= key < secp256k1_n")
+    else:
+        pub_c = privkey_to_compressed_pubkey(priv)
+        print()
+        print("compressed pubkey:", pub_c.hex())
 
-    print("P2PKH (1...):", pubkey_to_p2pkh(pub_c))
-    print("P2WPKH (bc1q):", p2wpkh_bech32_address(pub_c))
-    print("P2SH-P2WPKH (3...):", p2sh_p2wpkh_address(pub_c))    
+        print("P2PKH (1...):", pubkey_to_p2pkh(pub_c))
+        print("P2WPKH (bc1q):", p2wpkh_bech32_address(pub_c))
+        print("P2SH-P2WPKH (3...):", p2sh_p2wpkh_address(pub_c))    
 
 """
 def cmd_addr(args):
@@ -126,7 +132,7 @@ def main():
     p_addr = sub.add_parser("addr", help="privkey -> pubkey -> addresses + scripts")
     p_addr.add_argument("--privhex", required=True, help="32-byte private key hex (64 hex chars)")
     #p_addr.add_argument("--testnet", action="store_true", help="use testnet version")#to be implemented in future
-    p_addr.set_defaults(func=cmd_addr)
+    p_addr.set_defaults(func=cmd_addr, parser=p_addr)
 
     args = parser.parse_args()
     args.func(args)
