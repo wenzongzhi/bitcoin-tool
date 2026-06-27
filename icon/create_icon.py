@@ -18,17 +18,20 @@ from pathlib import Path
 from PIL import Image
 
 ICON_DIR = Path(__file__).resolve().parent
+LOGO = ICON_DIR / "logo.png"
+ICON = ICON_DIR / "bitcoin_tool.ico"
 
-img = Image.open(str(ICON_DIR / "logo.png"))
-img.save(
-    str(ICON_DIR / "bitcoin_tool.ico"),
-    sizes=[
-        (16, 16),
-        (24, 24),
-        (32, 32),
-        (48, 48),
-        (64, 64),
-        (128, 128),
-        (256, 256),
-    ]
-)
+if not ICON.exists():
+    img = Image.open(LOGO).convert("RGBA")
+    img.save(
+        ICON,
+        sizes=[
+            (16, 16),
+            (24, 24),
+            (32, 32),
+            (48, 48),
+            (64, 64),
+            (128, 128),
+            (256, 256),
+        ]
+    )

@@ -36,8 +36,9 @@ def sha256_file(path: str) -> bytes:
             h.update(chunk)
     return h.digest()
 
-def dbl_sha256_file(b: bytes) -> bytes:
-    return hashlib.sha256(hashlib.sha256(b).digest()).digest()
+def dbl_sha256_file(path) -> bytes:
+    first = sha256_file(path)
+    return hashlib.sha256(first).digest()
     
 def show(label: str, b: bytes):
     print(f"{label}:")

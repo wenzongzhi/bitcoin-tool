@@ -52,7 +52,7 @@ def cmd_hash(args):
             
         file_path = file_path.resolve()
         h1 = sha256_file(file_path)
-        h2 = dbl_sha256_file(Path(file_path).read_bytes())
+        h2 = dbl_sha256_file(file_path)
         print("file:", file_path)
         print("SHA256(file)      =", h1.hex())
         print("Double-SHA256(file)=", h2.hex())

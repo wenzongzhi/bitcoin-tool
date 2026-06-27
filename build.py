@@ -18,16 +18,19 @@ from pathlib import Path
 import hashlib
 import subprocess
 import sys
+from version import __version__
 
 ROOT = Path(__file__).resolve().parent
 
-VERSION_FILE = ROOT / "version_info.txt"
 CREATE_ICON = ROOT / "icon" / "create_icon.py"
 ICON = ROOT / "icon" / "bitcoin_tool.ico"
 ENTRY = ROOT / "bitcoin_tool.py"
 EXE = ROOT / "dist" / "bitcoin_tool.exe"
 SHA256SUMS = ROOT / "dist" / "SHA256SUMS"
 COMMIT_INFO = ROOT / "dist" / "BUILD_INFO.txt"
+
+VERSION_TEMPLATE = ROOT / "version_info.template"
+VERSION_FILE = ROOT / "build" / "version_info.txt"
 
 def git_commit():
     try:
@@ -46,9 +49,33 @@ def sha256_file(path):
             h.update(chunk)
     return h.hexdigest()
 
+def version_tuple(version: str) -> tuple[int, int, int, int]:
+    try:
+        parts = [int(x) for x in version.split(".")]
+    except ValueError:
+        raise ValueError(
+            f"Invalid version '{version}', expected format like '0.1.0'"
+        )
+    return tuple((parts + [0, 0, 0, 0])[:4])
+
+def write_version_info():
+    VERSION_FILE.parent.mkdir(exist_ok=True)
+
+    v = version_tuple(__version__)
+
+    text = VERSION_TEMPLATE.read_text(encoding="utf-8").format(
+        filevers=v,
+        prodvers=v,
+        version=__version__,
+    )
+
+    VERSION_FILE.write_text(text, encoding="utf-8")
+
 try:
     subprocess.check_call([sys.executable, str(CREATE_ICON)], cwd=ROOT)
-
+    
+    write_version_info()
+    
     subprocess.check_call([
         sys.executable, "-m", "PyInstaller",
         "--clean",
@@ -62,7 +89,7 @@ try:
     digest = sha256_file(EXE)
     
     SHA256SUMS.write_text(
-        f"{digest}  {EXE.name}",
+        f"{digest}  {EXE.name}\n",
         encoding="utf-8",
     )
 
