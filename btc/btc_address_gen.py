@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 import hashlib
-from ecdsa import SigningKey, SECP256k1
+from ecdsa import MalformedPointError, SigningKey, SECP256k1, VerifyingKey
 from bech32 import bech32_encode, convertbits
 
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -50,14 +50,57 @@ def base58check(version: bytes, payload: bytes) -> str:
     checksum = sha256(sha256(data))[:4]
     return base58_encode(data + checksum)
 
-def privkey_to_compressed_pubkey(privkey32: bytes) -> bytes:
+def privkey_to_pubkey(privkey32: bytes, compressed: bool = True) -> bytes:
     sk = SigningKey.from_string(privkey32, curve=SECP256k1)
     vk = sk.verifying_key
     x = vk.pubkey.point.x()
     y = vk.pubkey.point.y()
     x_bytes = x.to_bytes(32, "big")
+    if not compressed:
+        return b"\x04" + x_bytes + y.to_bytes(32, "big")
     prefix = b"\x02" if (y % 2 == 0) else b"\x03"
     return prefix + x_bytes
+
+
+def privkey_to_compressed_pubkey(privkey32: bytes) -> bytes:
+    return privkey_to_pubkey(privkey32, compressed=True)
+
+
+def is_valid_public_key(pubkey: bytes) -> bool:
+    if len(pubkey) == 33:
+        valid_encodings = {"compressed"}
+    elif len(pubkey) == 65:
+        valid_encodings = {"uncompressed"}
+    else:
+        return False
+
+    try:
+        VerifyingKey.from_string(
+            pubkey,
+            curve=SECP256k1,
+            validate_point=True,
+            valid_encodings=valid_encodings,
+        )
+    except (MalformedPointError, ValueError):
+        return False
+    return True
+
+
+def public_key_to_compressed(pubkey: bytes) -> bytes:
+    try:
+        vk = VerifyingKey.from_string(
+            pubkey,
+            curve=SECP256k1,
+            validate_point=True,
+            valid_encodings={"compressed", "uncompressed"},
+        )
+    except (MalformedPointError, ValueError) as exc:
+        raise ValueError("invalid secp256k1 public key") from exc
+
+    point = vk.pubkey.point
+    prefix = b"\x02" if point.y() % 2 == 0 else b"\x03"
+    return prefix + point.x().to_bytes(32, "big")
+
 
 def p2wpkh_bech32_address(pubkey_compressed: bytes) -> str:
     h160 = hash160(pubkey_compressed)  # 20 bytes
@@ -77,17 +120,3 @@ def pubkey_to_p2pkh(pubkey: bytes) -> str:
     checksum = sha256(sha256(payload))[:4]
     return base58_encode(payload + checksum)
 
-""" the following code just for your test  
-# your private key
-#pi64 = "3141592653589793238462643383279502884197169399375105820974944592"
-pi64 = "1415926535897932384626433832795028841971693993751058209749445923"
-
-priv = bytes.fromhex(pi64)
-
-pub_c = privkey_to_compressed_pubkey(priv)
-print("compressed pubkey:", pub_c.hex())
-
-print("P2PKH (1...):", pubkey_to_p2pkh(pub_c))
-print("P2WPKH (bc1q):", p2wpkh_bech32_address(pub_c))
-print("P2SH-P2WPKH (3...):", p2sh_p2wpkh_address(pub_c))
-"""

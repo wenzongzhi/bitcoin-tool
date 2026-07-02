@@ -18,7 +18,14 @@ import argparse
 from pathlib import Path
 from btc.hash import sha256, dbl_sha256, sha256_file, dbl_sha256_file, show
 from btc.private_key_gen import generate_32bytes_private_key, is_valid_privkey
-from btc.btc_address_gen import privkey_to_compressed_pubkey, pubkey_to_p2pkh, p2wpkh_bech32_address, p2sh_p2wpkh_address
+from btc.btc_address_gen import (
+    is_valid_public_key,
+    privkey_to_pubkey,
+    public_key_to_compressed,
+    pubkey_to_p2pkh,
+    p2wpkh_bech32_address,
+    p2sh_p2wpkh_address,
+)
 from version import __version__
 
 def cmd_hash(args):
@@ -65,42 +72,48 @@ def cmd_gen(args):
     print(f"32 Bytes Hex private key:   ", key_hex)
     
 def cmd_addr(args):
-    try:
-        priv = bytes.fromhex(args.privhex)
-    except ValueError:
-        args.parser.error("invalid hex private key")
+    if args.private_key_hex is not None:
+        try:
+            priv = bytes.fromhex(args.private_key_hex)
+        except ValueError:
+            args.parser.error("invalid hex private key")
 
-    if not is_valid_privkey(priv):
-        args.parser.error("invalid private key: must be 32 bytes and 1 <= key < secp256k1_n")
-    else:
-        pub_c = privkey_to_compressed_pubkey(priv)
+        if not is_valid_privkey(priv):
+            args.parser.error("invalid private key: must be 32 bytes and 1 <= key < secp256k1_n")
+
+        pub_c = privkey_to_pubkey(priv, compressed=True)
+        pub_u = privkey_to_pubkey(priv, compressed=False)
+        print("compressed pubkey  :", pub_c.hex())
+        print("uncompressed pubkey:", pub_u.hex())
         print()
-        print("compressed pubkey:", pub_c.hex())
+        print("P2PKH (compressed pubkey)  :", pubkey_to_p2pkh(pub_c))
+        print("P2PKH (uncompressed pubkey):", pubkey_to_p2pkh(pub_u))
+        print("P2WPKH (bc1q)              :", p2wpkh_bech32_address(pub_c))
+        print("P2SH-P2WPKH (3...)         :", p2sh_p2wpkh_address(pub_c))
+        return
 
-        print("P2PKH (1...):", pubkey_to_p2pkh(pub_c))
-        print("P2WPKH (bc1q):", p2wpkh_bech32_address(pub_c))
-        print("P2SH-P2WPKH (3...):", p2sh_p2wpkh_address(pub_c))    
+    try:
+        pubkey = bytes.fromhex(args.public_key_hex)
+    except ValueError:
+        args.parser.error("invalid hex public key")
 
-"""
-def cmd_addr(args):
-    priv = bytes.fromhex(args.privhex)
-    pub_c = privkey_to_pubkey(priv, compressed=True)
-    pub_u = privkey_to_pubkey(priv, compressed=False)
+    if not is_valid_public_key(pubkey):
+        args.parser.error(
+            "invalid public key: expected a compressed (33-byte) or "
+            "uncompressed (65-byte) secp256k1 public key"
+        )
 
-    print("pubkey_compressed  :", pub_c.hex())
-    print("pubkey_uncompressed:", pub_u.hex())
-    print()
+    compressed = len(pubkey) == 33
+    pub_c = public_key_to_compressed(pubkey)
+    print("input public key type        :", "compressed" if compressed else "uncompressed")
+    if not compressed:
+        print("P2PKH (uncompressed pubkey)  :", pubkey_to_p2pkh(pubkey))
+    print("compressed pubkey            :", pub_c.hex())
+    print("P2PKH (compressed pubkey)    :", pubkey_to_p2pkh(pub_c))
+    print("P2WPKH (bc1q)                :", p2wpkh_bech32_address(pub_c))
+    print("P2SH-P2WPKH (3...)           :", p2sh_p2wpkh_address(pub_c))
 
-    print("P2PKH (compressed pubkey)  :", p2pkh_address(pub_c, mainnet=not args.testnet))
-    print("P2PKH (uncompressed pubkey):", p2pkh_address(pub_u, mainnet=not args.testnet))
-    print("P2WPKH (bc1)               :", p2wpkh_address(pub_c, mainnet=not args.testnet))
-    print("P2SH-P2WPKH (3...)         :", p2sh_p2wpkh_address(pub_c, mainnet=not args.testnet))
-    print()
 
-    scripts = scripts_for_pubkey(pub_c, mainnet=not args.testnet)
-    for k, v in scripts.items():
-        print(f"{k}: {v}")
-"""
 def main():
     parser = argparse.ArgumentParser(
         prog="bitcoin_tool",
@@ -129,8 +142,16 @@ def main():
     p_gen.set_defaults(func=cmd_gen)
     
     # addr
-    p_addr = sub.add_parser("addr", help="privkey -> pubkey -> addresses + scripts")
-    p_addr.add_argument("--privhex", required=True, help="32-byte private key hex (64 hex chars)")
+    p_addr = sub.add_parser("addr", help="private/public key -> Bitcoin addresses")
+    addr_input = p_addr.add_mutually_exclusive_group(required=True)
+    addr_input.add_argument(
+        "--private-key-hex",
+        help="32-byte private key hex (64 hex chars)",
+    )
+    addr_input.add_argument(
+        "--public-key-hex",
+        help="compressed (33-byte) or uncompressed (65-byte) public key hex",
+    )
     #p_addr.add_argument("--testnet", action="store_true", help="use testnet version")#to be implemented in future
     p_addr.set_defaults(func=cmd_addr, parser=p_addr)
 
