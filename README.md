@@ -4,7 +4,7 @@ You can use this tool to complete the following task
 - Calculate the hash value of any file and any string
 - Generate a 32 bytes (256 bit) Bitcoin private key
 - Generate compressed/uncompressed public keys and P2PKH addresses from a private key
-- Generate P2PKH, P2WPKH, and P2SH-P2WPKH addresses from a compressed public key
+- Generate P2PKH, P2WPKH, P2SH-P2WPKH, and P2TR addresses from a compressed public key
 - Generate a P2PKH address from an uncompressed public key
 
 ## Operating environment
@@ -37,7 +37,7 @@ $ python bitcoin_tool.py hash -s "The Times 03/Jan/2009 Chancellor on brink of s
 $ python bitcoin_tool.py hash -f "E:\github\privatekey\bitcoin.pdf"
 ```
 
-- generate public key/P2PKH/P2WPKH/P2SH-P2WPKH address 
+- generate public key/P2PKH/P2WPKH/P2SH-P2WPKH/P2TR address
 ```bash
 $ python bitcoin_tool.py addr --private-key-hex "1415926535897932384626433832795028841971693993751058209749445923"
 ```

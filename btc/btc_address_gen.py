@@ -16,9 +16,11 @@ limitations under the License.
 
 import hashlib
 from ecdsa import MalformedPointError, SigningKey, SECP256k1, VerifyingKey
-from bech32 import bech32_encode, convertbits
+from ecdsa.ellipticcurve import INFINITY
+from bech32 import CHARSET, bech32_encode, bech32_hrp_expand, bech32_polymod, convertbits
 
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+BECH32M_CONST = 0x2BC830A3
 
 def sha256(b: bytes) -> bytes:
     return hashlib.sha256(b).digest()
@@ -102,11 +104,49 @@ def public_key_to_compressed(pubkey: bytes) -> bytes:
     return prefix + point.x().to_bytes(32, "big")
 
 
+def tagged_hash(tag: str, data: bytes) -> bytes:
+    tag_hash = sha256(tag.encode("ascii"))
+    return sha256(tag_hash + tag_hash + data)
+
+
+def bech32m_encode(hrp: str, data: list[int]) -> str:
+    polymod = bech32_polymod(bech32_hrp_expand(hrp) + data + [0] * 6)
+    checksum_value = polymod ^ BECH32M_CONST
+    checksum = [(checksum_value >> (5 * (5 - i))) & 31 for i in range(6)]
+    return hrp + "1" + "".join(CHARSET[value] for value in data + checksum)
+
+
 def p2wpkh_bech32_address(pubkey_compressed: bytes) -> str:
     h160 = hash160(pubkey_compressed)  # 20 bytes
     # witness version 0, program=20 bytes
     data = [0] + list(convertbits(h160, 8, 5, True))
     return bech32_encode("bc", data)
+
+
+def p2tr_address(pubkey_compressed: bytes) -> str:
+    if len(pubkey_compressed) != 33 or not is_valid_public_key(pubkey_compressed):
+        raise ValueError("P2TR requires a compressed secp256k1 public key")
+
+    internal_key = pubkey_compressed[1:]
+    even_pubkey = b"\x02" + internal_key
+    internal_point = VerifyingKey.from_string(
+        even_pubkey,
+        curve=SECP256k1,
+        validate_point=True,
+        valid_encodings={"compressed"},
+    ).pubkey.point
+
+    tweak = int.from_bytes(tagged_hash("TapTweak", internal_key), "big")
+    if tweak >= SECP256k1.order:
+        raise ValueError("invalid Taproot tweak")
+
+    output_point = internal_point + tweak * SECP256k1.generator
+    if output_point == INFINITY:
+        raise ValueError("invalid Taproot output point")
+    output_key = output_point.x().to_bytes(32, "big")
+    data = [1] + list(convertbits(output_key, 8, 5, True))
+    return bech32m_encode("bc", data)
+
 
 def p2sh_p2wpkh_address(pubkey_compressed: bytes) -> str:
     h160 = hash160(pubkey_compressed)
@@ -119,4 +159,3 @@ def pubkey_to_p2pkh(pubkey: bytes) -> str:
     payload = b"\x00" + h160  # mainnet P2PKH version byte
     checksum = sha256(sha256(payload))[:4]
     return base58_encode(payload + checksum)
-

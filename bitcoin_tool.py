@@ -23,6 +23,7 @@ from btc.btc_address_gen import (
     privkey_to_pubkey,
     public_key_to_compressed,
     pubkey_to_p2pkh,
+    p2tr_address,
     p2wpkh_bech32_address,
     p2sh_p2wpkh_address,
 )
@@ -90,6 +91,7 @@ def cmd_addr(args):
         print("P2PKH (uncompressed pubkey):", pubkey_to_p2pkh(pub_u))
         print("P2WPKH (bc1q)              :", p2wpkh_bech32_address(pub_c))
         print("P2SH-P2WPKH (3...)         :", p2sh_p2wpkh_address(pub_c))
+        print("P2TR (bc1p)                :", p2tr_address(pub_c))
         return
 
     try:
@@ -112,6 +114,7 @@ def cmd_addr(args):
     print("P2PKH (compressed pubkey)    :", pubkey_to_p2pkh(pub_c))
     print("P2WPKH (bc1q)                :", p2wpkh_bech32_address(pub_c))
     print("P2SH-P2WPKH (3...)           :", p2sh_p2wpkh_address(pub_c))
+    print("P2TR (bc1p)                  :", p2tr_address(pub_c))
 
 
 def main():
