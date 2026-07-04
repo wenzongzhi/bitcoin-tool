@@ -1,0 +1,7 @@
+bech32
+bip32
+cryptography
+ecdsa
+filelock
+mnemonic
+platformdirs

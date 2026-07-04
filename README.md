@@ -61,4 +61,19 @@ $ python bitcoin_tool.py createwallet --wallet-name "unsafe_test_wallet"
 $ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01" --password "test-password"
 ```
 
+- rebuild issued address records from the deterministic wallet state
+```bash
+$ python bitcoin_tool.py rebuildaddressbook --wallet-name "my_BTC_01" --password "test-password"
+```
+
+Wallet data is stored outside the source tree by default:
+
+- Windows: `%LOCALAPPDATA%\bitcoin-tool\wallets.json`
+- Linux: `~/.local/share/bitcoin-tool/wallets.json`
+- macOS: `~/Library/Application Support/bitcoin-tool/wallets.json`
+
+Use `--datadir PATH` on a wallet command, or set `BITCOIN_TOOL_DATADIR`, to override this location. Each issued address is recorded as public metadata in `issued_addresses`; private keys are never stored separately.
+
+Existing `wallets.json` files in the project root are not moved automatically. Move the file to the user data directory, or use `--datadir` with the old directory explicitly.
+
 Passwords passed on the command line may be recorded in shell history. These wallet commands are intended for study and experimentation, not production custody.

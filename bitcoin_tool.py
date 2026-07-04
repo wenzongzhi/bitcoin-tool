@@ -29,7 +29,13 @@ from btc.btc_address_gen import (
     p2sh_p2wpkh_address,
 )
 from version import __version__
-from wallet import WalletError, create_wallet, get_new_address
+from wallet import (
+    WalletError,
+    create_wallet,
+    default_wallet_file,
+    get_new_address,
+    rebuild_address_book,
+)
 
 def cmd_hash(args):
     parser = args.parser
@@ -125,6 +131,7 @@ def cmd_createwallet(args):
             wallet_name=args.wallet_name,
             password=args.password,
             entropy_hex=args.entropy_hex,
+            wallet_file=default_wallet_file(args.datadir),
         )
     except WalletError as exc:
         args.parser.error(str(exc))
@@ -146,6 +153,7 @@ def cmd_getnewaddress(args):
         result = get_new_address(
             wallet_name=args.wallet_name,
             password=args.password,
+            wallet_file=default_wallet_file(args.datadir),
         )
     except WalletError as exc:
         args.parser.error(str(exc))
@@ -153,7 +161,33 @@ def cmd_getnewaddress(args):
     print("wallet name     :", result["wallet_name"])
     print("address         :", result["address"])
     print("address type    :", result["address_type"])
+    print("address index   :", result["index"])
     print("derivation path :", result["derivation_path"])
+
+
+def cmd_rebuildaddressbook(args):
+    try:
+        result = rebuild_address_book(
+            wallet_name=args.wallet_name,
+            password=args.password,
+            wallet_file=default_wallet_file(args.datadir),
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+
+    print("wallet name       :", result["wallet_name"])
+    print("address count     :", result["address_count"])
+    print("recovered entries :", result["recovered_count"])
+    print("wallet file       :", result["wallet_file"])
+
+
+def add_wallet_access_arguments(parser):
+    parser.add_argument("--wallet-name", required=True, help="wallet name")
+    parser.add_argument("--password", help="password for an encrypted wallet")
+    parser.add_argument(
+        "--datadir",
+        help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",
+    )
 
 
 def main():
@@ -212,6 +246,10 @@ def main():
         "--password",
         help="encrypt the mnemonic with AES-256-GCM",
     )
+    p_createwallet.add_argument(
+        "--datadir",
+        help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",
+    )
     p_createwallet.set_defaults(func=cmd_createwallet, parser=p_createwallet)
 
     # getnewaddress
@@ -219,12 +257,19 @@ def main():
         "getnewaddress",
         help="derive the next P2WPKH receiving address",
     )
-    p_getnewaddress.add_argument("--wallet-name", required=True, help="wallet name")
-    p_getnewaddress.add_argument(
-        "--password",
-        help="password for an encrypted wallet",
-    )
+    add_wallet_access_arguments(p_getnewaddress)
     p_getnewaddress.set_defaults(func=cmd_getnewaddress, parser=p_getnewaddress)
+
+    # rebuildaddressbook
+    p_rebuildaddressbook = sub.add_parser(
+        "rebuildaddressbook",
+        help="rebuild issued address metadata from the wallet mnemonic",
+    )
+    add_wallet_access_arguments(p_rebuildaddressbook)
+    p_rebuildaddressbook.set_defaults(
+        func=cmd_rebuildaddressbook,
+        parser=p_rebuildaddressbook,
+    )
 
     args = parser.parse_args()
     args.func(args)
