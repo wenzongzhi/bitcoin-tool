@@ -161,7 +161,6 @@ def create_wallet(
         "encrypted": password is not None,
         "derivation_path": BTC_RECEIVE_PATH,
         "next_address_index": 0,
-        "issued_addresses": [],
     }
 
     if password is None:
@@ -183,6 +182,7 @@ def create_wallet(
             "nonce": nonce.hex(),
             "ciphertext": ciphertext.hex(),
         }
+    wallet["issued_addresses"] = []
 
     with _locked_wallet_file(path):
         wallets = _load_wallets(path)
@@ -192,7 +192,7 @@ def create_wallet(
         _save_wallets(wallets, path)
     return {
         "wallet_name": wallet_name,
-        "mnemonic": mnemonic,
+        "mnemonic": mnemonic if password is None else None,
         "encrypted": wallet["encrypted"],
         "wallet_file": str(path),
     }
@@ -233,6 +233,32 @@ def _read_mnemonic(wallet_name: str, wallet: dict, password: str | None) -> str:
         raise WalletError("incorrect password or corrupted wallet data") from exc
     except (KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
         raise WalletError("invalid wallet encryption metadata") from exc
+
+
+def get_mnemonic(
+    wallet_name: str,
+    password: str,
+    wallet_file: Path | None = None,
+) -> dict:
+    _validate_wallet_name(wallet_name)
+    if not password:
+        raise WalletError("password is required")
+
+    path = wallet_file or default_wallet_file()
+    with _locked_wallet_file(path):
+        wallets = _load_wallets(path)
+        wallet = wallets.get(wallet_name)
+        if not isinstance(wallet, dict):
+            raise WalletError(f'wallet "{wallet_name}" does not exist')
+        if not wallet.get("encrypted"):
+            raise WalletError("wallet mnemonic is not encrypted")
+        mnemonic = _read_mnemonic(wallet_name, wallet, password)
+        _validate_mnemonic(mnemonic)
+
+    return {
+        "wallet_name": wallet_name,
+        "mnemonic": mnemonic,
+    }
 
 
 def get_new_address(

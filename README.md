@@ -51,6 +51,11 @@ $ python bitcoin_tool.py createwallet --wallet-name "my_BTC_01" --password "test
 $ python bitcoin_tool.py createwallet --wallet-name "my_BTC_02" --entropy-hex "0000000000000000000000000000000000000000000000000000000000000000" --password "test-password"
 ```
 
+Encrypted wallet creation does not print the mnemonic. Use the explicit command below when it must be viewed:
+```bash
+$ python bitcoin_tool.py getmnemonic --wallet-name "my_BTC_01" --password "test-password"
+```
+
 - create a plaintext wallet for experiments only
 ```bash
 $ python bitcoin_tool.py createwallet --wallet-name "unsafe_test_wallet"

@@ -33,6 +33,7 @@ from wallet import (
     WalletError,
     create_wallet,
     default_wallet_file,
+    get_mnemonic,
     get_new_address,
     rebuild_address_book,
 )
@@ -143,7 +144,8 @@ def cmd_createwallet(args):
             file=sys.stderr,
         )
     print("wallet name :", result["wallet_name"])
-    print("mnemonic    :", result["mnemonic"])
+    if result["mnemonic"] is not None:
+        print("mnemonic    :", result["mnemonic"])
     print("encrypted   :", "yes" if result["encrypted"] else "no")
     print("wallet file :", result["wallet_file"])
 
@@ -163,6 +165,20 @@ def cmd_getnewaddress(args):
     print("address type    :", result["address_type"])
     print("address index   :", result["index"])
     print("derivation path :", result["derivation_path"])
+
+
+def cmd_getmnemonic(args):
+    try:
+        result = get_mnemonic(
+            wallet_name=args.wallet_name,
+            password=args.password,
+            wallet_file=default_wallet_file(args.datadir),
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+
+    print("wallet name :", result["wallet_name"])
+    print("mnemonic    :", result["mnemonic"])
 
 
 def cmd_rebuildaddressbook(args):
@@ -259,6 +275,23 @@ def main():
     )
     add_wallet_access_arguments(p_getnewaddress)
     p_getnewaddress.set_defaults(func=cmd_getnewaddress, parser=p_getnewaddress)
+
+    # getmnemonic
+    p_getmnemonic = sub.add_parser(
+        "getmnemonic",
+        help="decrypt and display an encrypted wallet mnemonic",
+    )
+    p_getmnemonic.add_argument("--wallet-name", required=True, help="wallet name")
+    p_getmnemonic.add_argument(
+        "--password",
+        required=True,
+        help="password for the encrypted wallet",
+    )
+    p_getmnemonic.add_argument(
+        "--datadir",
+        help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",
+    )
+    p_getmnemonic.set_defaults(func=cmd_getmnemonic, parser=p_getmnemonic)
 
     # rebuildaddressbook
     p_rebuildaddressbook = sub.add_parser(
