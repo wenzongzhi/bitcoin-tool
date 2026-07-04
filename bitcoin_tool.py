@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import argparse
+import sys
 from pathlib import Path
 from btc.hash import sha256, dbl_sha256, sha256_file, dbl_sha256_file, show
 from btc.private_key_gen import generate_32bytes_private_key, is_valid_privkey
@@ -28,6 +29,7 @@ from btc.btc_address_gen import (
     p2sh_p2wpkh_address,
 )
 from version import __version__
+from wallet import WalletError, create_wallet, get_new_address
 
 def cmd_hash(args):
     parser = args.parser
@@ -117,6 +119,43 @@ def cmd_addr(args):
     print("P2TR (bc1p)                  :", p2tr_address(pub_c))
 
 
+def cmd_createwallet(args):
+    try:
+        result = create_wallet(
+            wallet_name=args.wallet_name,
+            password=args.password,
+            entropy_hex=args.entropy_hex,
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+
+    if not result["encrypted"]:
+        print(
+            "WARNING: mnemonic is stored without encryption. "
+            "This is dangerous and intended for experiments only.",
+            file=sys.stderr,
+        )
+    print("wallet name :", result["wallet_name"])
+    print("mnemonic    :", result["mnemonic"])
+    print("encrypted   :", "yes" if result["encrypted"] else "no")
+    print("wallet file :", result["wallet_file"])
+
+
+def cmd_getnewaddress(args):
+    try:
+        result = get_new_address(
+            wallet_name=args.wallet_name,
+            password=args.password,
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+
+    print("wallet name     :", result["wallet_name"])
+    print("address         :", result["address"])
+    print("address type    :", result["address_type"])
+    print("derivation path :", result["derivation_path"])
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="bitcoin_tool",
@@ -157,6 +196,35 @@ def main():
     )
     #p_addr.add_argument("--testnet", action="store_true", help="use testnet version")#to be implemented in future
     p_addr.set_defaults(func=cmd_addr, parser=p_addr)
+
+    # createwallet
+    p_createwallet = sub.add_parser("createwallet", help="create a BIP84 wallet")
+    p_createwallet.add_argument(
+        "--wallet-name",
+        required=True,
+        help="wallet name (letters, numbers, underscores, and hyphens)",
+    )
+    p_createwallet.add_argument(
+        "--entropy-hex",
+        help="optional 256-bit entropy (64 hex characters)",
+    )
+    p_createwallet.add_argument(
+        "--password",
+        help="encrypt the mnemonic with AES-256-GCM",
+    )
+    p_createwallet.set_defaults(func=cmd_createwallet, parser=p_createwallet)
+
+    # getnewaddress
+    p_getnewaddress = sub.add_parser(
+        "getnewaddress",
+        help="derive the next P2WPKH receiving address",
+    )
+    p_getnewaddress.add_argument("--wallet-name", required=True, help="wallet name")
+    p_getnewaddress.add_argument(
+        "--password",
+        help="password for an encrypted wallet",
+    )
+    p_getnewaddress.set_defaults(func=cmd_getnewaddress, parser=p_getnewaddress)
 
     args = parser.parse_args()
     args.func(args)
