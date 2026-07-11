@@ -33,6 +33,8 @@ from wallet import (
     WalletError,
     create_wallet,
     default_wallet_file,
+    derive_p2wpkh_from_account_xpub,
+    export_account_xpub,
     get_mnemonic,
     get_new_address,
     rebuild_address_book,
@@ -156,6 +158,7 @@ def cmd_getnewaddress(args):
             wallet_name=args.wallet_name,
             password=args.password,
             wallet_file=default_wallet_file(args.datadir),
+            change=args.change,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
@@ -163,7 +166,10 @@ def cmd_getnewaddress(args):
     print("wallet name     :", result["wallet_name"])
     print("address         :", result["address"])
     print("address type    :", result["address_type"])
+    print("address purpose :", result["purpose"])
+    print("branch          :", result["branch"])
     print("address index   :", result["index"])
+    print("relative path   :", result["relative_derivation_path"])
     print("derivation path :", result["derivation_path"])
 
 
@@ -197,9 +203,48 @@ def cmd_rebuildaddressbook(args):
     print("wallet file       :", result["wallet_file"])
 
 
+def cmd_exportxpub(args):
+    try:
+        result = export_account_xpub(
+            wallet_name=args.wallet_name,
+            password=args.password,
+            wallet_file=default_wallet_file(args.datadir),
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+
+    print("wallet name     :", result["wallet_name"])
+    print("address type    :", result["address_type"])
+    print("account path    :", result["account_derivation_path"])
+    print("account xpub    :", result["account_xpub"])
+    print("descriptor-like :", result["descriptor_like"])
+
+
+def cmd_derivepub(args):
+    try:
+        if args.type.lower() != "p2wpkh":
+            args.parser.error("only p2wpkh derivation is currently supported")
+        address = derive_p2wpkh_from_account_xpub(
+            args.xpub,
+            args.branch,
+            args.index,
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+
+    print("address type :", "P2WPKH")
+    print("branch       :", args.branch)
+    print("index        :", args.index)
+    print("relative path:", f"m/{args.branch}/{args.index}")
+    print("address      :", address)
+
+
 def add_wallet_access_arguments(parser):
     parser.add_argument("--wallet-name", required=True, help="wallet name")
-    parser.add_argument("--password", help="password for an encrypted wallet")
+    parser.add_argument(
+        "--password",
+        help="password, required only when upgrading a legacy encrypted wallet",
+    )
     parser.add_argument(
         "--datadir",
         help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",
@@ -274,6 +319,11 @@ def main():
         help="derive the next P2WPKH receiving address",
     )
     add_wallet_access_arguments(p_getnewaddress)
+    p_getnewaddress.add_argument(
+        "--change",
+        action="store_true",
+        help="derive the next P2WPKH change address instead of a receiving address",
+    )
     p_getnewaddress.set_defaults(func=cmd_getnewaddress, parser=p_getnewaddress)
 
     # getmnemonic
@@ -296,13 +346,51 @@ def main():
     # rebuildaddressbook
     p_rebuildaddressbook = sub.add_parser(
         "rebuildaddressbook",
-        help="rebuild issued address metadata from the wallet mnemonic",
+        help="rebuild issued address metadata from wallet public derivation state",
     )
     add_wallet_access_arguments(p_rebuildaddressbook)
     p_rebuildaddressbook.set_defaults(
         func=cmd_rebuildaddressbook,
         parser=p_rebuildaddressbook,
     )
+
+    # exportxpub
+    p_exportxpub = sub.add_parser(
+        "exportxpub",
+        help="export the BIP84 account xpub for a wallet",
+    )
+    p_exportxpub.add_argument("--wallet-name", required=True, help="wallet name")
+    p_exportxpub.add_argument(
+        "--password",
+        help="password for an encrypted wallet",
+    )
+    p_exportxpub.add_argument(
+        "--datadir",
+        help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",
+    )
+    p_exportxpub.set_defaults(func=cmd_exportxpub, parser=p_exportxpub)
+
+    # derivepub
+    p_derivepub = sub.add_parser(
+        "derivepub",
+        help="derive a P2WPKH address from an account xpub",
+    )
+    p_derivepub.add_argument("--xpub", required=True, help="account xpub")
+    p_derivepub.add_argument(
+        "--type",
+        default="p2wpkh",
+        choices=["p2wpkh"],
+        help="address type",
+    )
+    p_derivepub.add_argument(
+        "--branch",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="0 for receiving addresses, 1 for change addresses",
+    )
+    p_derivepub.add_argument("--index", type=int, required=True)
+    p_derivepub.set_defaults(func=cmd_derivepub, parser=p_derivepub)
 
     args = parser.parse_args()
     args.func(args)

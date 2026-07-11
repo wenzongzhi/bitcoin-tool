@@ -32,13 +32,17 @@ from mnemonic import Mnemonic
 from filelock import FileLock, Timeout
 from platformdirs import user_data_path
 
-from btc.btc_address_gen import p2wpkh_bech32_address, privkey_to_pubkey
+from btc.btc_address_gen import p2wpkh_bech32_address
 
 
 WALLET_FILENAME = "wallets.json"
 APP_NAME = "bitcoin-tool"
 DATADIR_ENV = "BITCOIN_TOOL_DATADIR"
-BTC_RECEIVE_PATH = "m/84'/0'/0'/0"
+BTC_ACCOUNT_PATH = "m/84'/0'/0'"
+BTC_RECEIVE_BRANCH = 0
+BTC_CHANGE_BRANCH = 1
+BTC_RECEIVE_PATH = f"{BTC_ACCOUNT_PATH}/{BTC_RECEIVE_BRANCH}"
+ADDRESS_TYPE_P2WPKH = "P2WPKH"
 PBKDF2_ITERATIONS = 200_000
 WALLET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -144,6 +148,15 @@ def _mnemonic_from_entropy(entropy_hex: str | None) -> str:
     return Mnemonic("english").to_mnemonic(entropy)
 
 
+def _derive_account_metadata(mnemonic: str) -> dict:
+    seed = Mnemonic.to_seed(mnemonic, passphrase="")
+    bip32 = BIP32.from_seed(seed)
+    return {
+        "account_xpub": bip32.get_xpub_from_path(BTC_ACCOUNT_PATH),
+        "master_fingerprint": bip32.get_fingerprint().hex(),
+    }
+
+
 def create_wallet(
     wallet_name: str,
     password: str | None = None,
@@ -156,11 +169,18 @@ def create_wallet(
 
     path = wallet_file or default_wallet_file()
     mnemonic = _mnemonic_from_entropy(entropy_hex)
+    account_metadata = _derive_account_metadata(mnemonic)
     wallet = {
-        "version": 1,
+        "version": 2,
         "encrypted": password is not None,
-        "derivation_path": BTC_RECEIVE_PATH,
-        "next_address_index": 0,
+        "address_type": ADDRESS_TYPE_P2WPKH,
+        "account_derivation_path": BTC_ACCOUNT_PATH,
+        "account_xpub": account_metadata["account_xpub"],
+        "master_fingerprint": account_metadata["master_fingerprint"],
+        "receive_branch": BTC_RECEIVE_BRANCH,
+        "change_branch": BTC_CHANGE_BRANCH,
+        "next_receive_index": 0,
+        "next_change_index": 0,
     }
 
     if password is None:
@@ -195,6 +215,7 @@ def create_wallet(
         "mnemonic": mnemonic if password is None else None,
         "encrypted": wallet["encrypted"],
         "wallet_file": str(path),
+        "account_xpub": account_metadata["account_xpub"],
     }
 
 
@@ -237,7 +258,7 @@ def _read_mnemonic(wallet_name: str, wallet: dict, password: str | None) -> str:
 
 def get_mnemonic(
     wallet_name: str,
-    password: str,
+    password: str | None = None,
     wallet_file: Path | None = None,
 ) -> dict:
     _validate_wallet_name(wallet_name)
@@ -248,8 +269,9 @@ def get_mnemonic(
     with _locked_wallet_file(path):
         wallets = _load_wallets(path)
         wallet = wallets.get(wallet_name)
+
         if not isinstance(wallet, dict):
-            raise WalletError(f'wallet "{wallet_name}" does not exist')
+            raise WalletError(f'wallet "{wallet_name}" does not exist in "{path}"')
         if not wallet.get("encrypted"):
             raise WalletError("wallet mnemonic is not encrypted")
         mnemonic = _read_mnemonic(wallet_name, wallet, password)
@@ -265,34 +287,53 @@ def get_new_address(
     wallet_name: str,
     password: str | None = None,
     wallet_file: Path | None = None,
+    change: bool = False,
 ) -> dict:
     _validate_wallet_name(wallet_name)
+    branch = BTC_CHANGE_BRANCH if change else BTC_RECEIVE_BRANCH
+    purpose = _branch_purpose(branch)
     path = wallet_file or default_wallet_file()
     with _locked_wallet_file(path):
         wallets = _load_wallets(path)
         wallet = wallets.get(wallet_name)
         if not isinstance(wallet, dict):
-            raise WalletError(f'wallet "{wallet_name}" does not exist')
+            raise WalletError(f'wallet "{wallet_name}" does not exist in "{path}"')
 
-        mnemonic = _read_mnemonic(wallet_name, wallet, password)
-        _validate_mnemonic(mnemonic)
-        index, base_path = _read_derivation_state(wallet)
+        upgraded = _ensure_account_metadata(wallet_name, wallet, password)
+        account_xpub, account_path, index = _read_public_derivation_state(wallet, branch)
 
         issued_addresses = wallet.setdefault("issued_addresses", [])
         if not isinstance(issued_addresses, list):
             raise WalletError("wallet address book is invalid")
-        if any(isinstance(entry, dict) and entry.get("index") == index for entry in issued_addresses):
+        if any(
+            isinstance(entry, dict)
+            and _entry_branch(entry) == branch
+            and entry.get("index") == index
+            for entry in issued_addresses
+        ):
             raise WalletError("wallet address index is already present in the address book")
 
-        entry = _derive_address_entry(mnemonic, base_path, index, created_at=_utc_now())
+        entry = _derive_address_entry_from_xpub(
+            account_xpub,
+            account_path,
+            branch,
+            index,
+            created_at=_utc_now(),
+            label="",
+        )
         issued_addresses.append(entry)
-        wallet["next_address_index"] = index + 1
+        wallet[_next_index_key(branch)] = index + 1
+        if upgraded:
+            wallet["version"] = 2
         _save_wallets(wallets, path)
     return {
         "wallet_name": wallet_name,
         "address": entry["address"],
         "address_type": entry["type"],
+        "purpose": purpose,
+        "branch": branch,
         "index": entry["index"],
+        "relative_derivation_path": entry["relative_path"],
         "derivation_path": entry["path"],
     }
 
@@ -302,36 +343,240 @@ def _validate_mnemonic(mnemonic: str) -> None:
         raise WalletError("wallet contains an invalid mnemonic")
 
 
-def _read_derivation_state(wallet: dict) -> tuple[int, str]:
+def _branch_purpose(branch: int) -> str:
+    if branch == BTC_RECEIVE_BRANCH:
+        return "receive"
+    if branch == BTC_CHANGE_BRANCH:
+        return "change"
+    raise WalletError("branch must be 0 receiving or 1 change")
+
+
+def _next_index_key(branch: int) -> str:
+    _branch_purpose(branch)
+    return "next_receive_index" if branch == BTC_RECEIVE_BRANCH else "next_change_index"
+
+
+def _entry_branch(entry: dict) -> int:
+    branch = entry.get("branch")
+    if isinstance(branch, int):
+        return branch
+    if entry.get("purpose") == "change":
+        return BTC_CHANGE_BRANCH
+    return BTC_RECEIVE_BRANCH
+
+
+def _normalize_issued_entries(entries: list) -> list:
+    normalized = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        item = dict(entry)
+        try:
+            index = int(item["index"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        branch = _entry_branch(item)
+        if branch not in (BTC_RECEIVE_BRANCH, BTC_CHANGE_BRANCH):
+            continue
+        item["index"] = index
+        item["branch"] = branch
+        item.setdefault("relative_path", f"m/{branch}/{index}")
+        item.setdefault("path", f"{BTC_ACCOUNT_PATH}/{branch}/{index}")
+        item.setdefault("purpose", _branch_purpose(branch))
+        item.setdefault("type", ADDRESS_TYPE_P2WPKH)
+        item.setdefault("label", "")
+        normalized.append(item)
+    return normalized
+
+
+def _upgrade_wallet_to_v2(wallet: dict, mnemonic: str) -> None:
+    _validate_mnemonic(mnemonic)
+    account_metadata = _derive_account_metadata(mnemonic)
     try:
-        index = int(wallet["next_address_index"])
-        base_path = wallet["derivation_path"]
-    except (KeyError, TypeError, ValueError) as exc:
+        next_receive_index = int(wallet.get("next_receive_index", wallet.get("next_address_index", 0)))
+        next_change_index = int(wallet.get("next_change_index", 0))
+    except (TypeError, ValueError) as exc:
         raise WalletError("wallet derivation metadata is invalid") from exc
-    if base_path != BTC_RECEIVE_PATH or not 0 <= index < 2**31:
+    if not 0 <= next_receive_index < 2**31 or not 0 <= next_change_index < 2**31:
         raise WalletError("wallet address index or derivation path is invalid")
-    return index, base_path
+
+    old_entries = wallet.get("issued_addresses", [])
+    if not isinstance(old_entries, list):
+        raise WalletError("wallet address book is invalid")
+
+    upgraded_wallet = {
+        "version": 2,
+        "encrypted": bool(wallet.get("encrypted")),
+        "address_type": ADDRESS_TYPE_P2WPKH,
+        "account_derivation_path": BTC_ACCOUNT_PATH,
+        "account_xpub": account_metadata["account_xpub"],
+        "master_fingerprint": account_metadata["master_fingerprint"],
+        "receive_branch": BTC_RECEIVE_BRANCH,
+        "change_branch": BTC_CHANGE_BRANCH,
+        "next_receive_index": next_receive_index,
+        "next_change_index": next_change_index,
+    }
+    if wallet.get("encrypted"):
+        encryption = wallet.get("encryption")
+        if not isinstance(encryption, dict):
+            raise WalletError("wallet encryption metadata is missing")
+        upgraded_wallet["encryption"] = encryption
+    else:
+        upgraded_wallet["mnemonic"] = mnemonic
+    upgraded_wallet["issued_addresses"] = _normalize_issued_entries(old_entries)
+
+    wallet.clear()
+    wallet.update(upgraded_wallet)
 
 
-def _derive_address_entry(
-    mnemonic: str,
-    base_path: str,
+def _ensure_account_metadata(
+    wallet_name: str,
+    wallet: dict,
+    password: str | None,
+) -> bool:
+    if "account_xpub" in wallet:
+        return False
+
+    try:
+        legacy_base_path = wallet["derivation_path"]
+    except KeyError as exc:
+        raise WalletError("wallet xpub metadata is invalid") from exc
+    if legacy_base_path != BTC_RECEIVE_PATH:
+        raise WalletError("wallet address index or derivation path is invalid")
+
+    if wallet.get("encrypted") and password is None:
+        raise WalletError(
+            "password is required once to upgrade this legacy encrypted wallet"
+        )
+    mnemonic = _read_mnemonic(wallet_name, wallet, password)
+    _upgrade_wallet_to_v2(wallet, mnemonic)
+    return True
+
+
+def _read_public_derivation_state(wallet: dict, branch: int) -> tuple[str, str, int]:
+    key = _next_index_key(branch)
+    try:
+        account_xpub = wallet["account_xpub"]
+        account_path = wallet["account_derivation_path"]
+        address_type = wallet["address_type"]
+        receive_branch = int(wallet["receive_branch"])
+        change_branch = int(wallet["change_branch"])
+        index = int(wallet[key])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise WalletError("wallet xpub metadata is invalid") from exc
+    if not isinstance(account_xpub, str) or not account_xpub:
+        raise WalletError("wallet xpub metadata is invalid")
+    if address_type != ADDRESS_TYPE_P2WPKH:
+        raise WalletError("only P2WPKH wallet address derivation is currently supported")
+    if (
+        account_path != BTC_ACCOUNT_PATH
+        or receive_branch != BTC_RECEIVE_BRANCH
+        or change_branch != BTC_CHANGE_BRANCH
+        or not 0 <= index < 2**31
+    ):
+        raise WalletError("wallet address index or derivation path is invalid")
+    return account_xpub, account_path, index
+
+
+def derive_p2wpkh_from_account_xpub(account_xpub: str, branch: int, index: int) -> str:
+    if branch not in (BTC_RECEIVE_BRANCH, BTC_CHANGE_BRANCH):
+        raise WalletError("branch must be 0 receiving or 1 change")
+    if not 0 <= index < 2**31:
+        raise WalletError("index must be non-hardened and in range 0..2147483647")
+    if not isinstance(account_xpub, str) or not account_xpub:
+        raise WalletError("account xpub is required")
+
+    try:
+        public_key = BIP32.from_xpub(account_xpub).get_pubkey_from_path(
+            f"m/{branch}/{index}"
+        )
+    except Exception as exc:
+        raise WalletError("cannot derive public key from account xpub") from exc
+    return p2wpkh_bech32_address(public_key)
+
+
+def _derive_address_entry_from_xpub(
+    account_xpub: str,
+    account_path: str,
+    branch: int,
     index: int,
     created_at: str | None,
     label: str = "",
 ) -> dict:
-    derivation_path = f"{base_path}/{index}"
-    seed = Mnemonic.to_seed(mnemonic, passphrase="")
-    private_key = BIP32.from_seed(seed).get_privkey_from_path(derivation_path)
-    public_key = privkey_to_pubkey(private_key, compressed=True)
+    relative_path = f"m/{branch}/{index}"
+    derivation_path = f"{account_path}/{branch}/{index}"
     return {
         "index": index,
+        "branch": branch,
+        "relative_path": relative_path,
         "path": derivation_path,
-        "address": p2wpkh_bech32_address(public_key),
-        "type": "P2WPKH",
-        "purpose": "receive",
+        "address": derive_p2wpkh_from_account_xpub(account_xpub, branch, index),
+        "type": ADDRESS_TYPE_P2WPKH,
+        "purpose": _branch_purpose(branch),
         "label": label,
         "created_at": created_at,
+    }
+
+
+def _descriptor_like(account_xpub: str, master_fingerprint: str) -> str:
+    account_suffix = BTC_ACCOUNT_PATH.removeprefix("m/")
+    return f"wpkh([{master_fingerprint}/{account_suffix}]{account_xpub}/0/*)"
+
+
+def export_account_xpub(
+    wallet_name: str,
+    password: str | None = None,
+    wallet_file: Path | None = None,
+) -> dict:
+    _validate_wallet_name(wallet_name)
+    path = wallet_file or default_wallet_file()
+    with _locked_wallet_file(path):
+        wallets = _load_wallets(path)
+        wallet = wallets.get(wallet_name)
+        if not isinstance(wallet, dict):
+            raise WalletError(f'wallet "{wallet_name}" does not exist in "{path}"')
+
+        changed = False
+        mnemonic = None
+        if wallet.get("encrypted"):
+            if not password:
+                raise WalletError("password is required to export account xpub")
+            mnemonic = _read_mnemonic(wallet_name, wallet, password)
+            _validate_mnemonic(mnemonic)
+        elif "account_xpub" not in wallet or "master_fingerprint" not in wallet:
+            mnemonic = _read_mnemonic(wallet_name, wallet, password)
+
+        if "account_xpub" not in wallet:
+            if mnemonic is None:
+                raise WalletError("wallet xpub metadata is invalid")
+            _upgrade_wallet_to_v2(wallet, mnemonic)
+            changed = True
+        elif "master_fingerprint" not in wallet:
+            if mnemonic is None:
+                raise WalletError("wallet master fingerprint metadata is invalid")
+            _upgrade_wallet_to_v2(wallet, mnemonic)
+            changed = True
+
+        account_xpub, account_path, _ = _read_public_derivation_state(
+            wallet,
+            BTC_RECEIVE_BRANCH,
+        )
+        master_fingerprint = wallet.get("master_fingerprint")
+        if not isinstance(master_fingerprint, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{8}",
+            master_fingerprint,
+        ):
+            raise WalletError("wallet master fingerprint metadata is invalid")
+
+        if changed:
+            _save_wallets(wallets, path)
+
+    return {
+        "wallet_name": wallet_name,
+        "address_type": ADDRESS_TYPE_P2WPKH,
+        "account_derivation_path": account_path,
+        "account_xpub": account_xpub,
+        "descriptor_like": _descriptor_like(account_xpub, master_fingerprint.lower()),
     }
 
 
@@ -348,34 +593,51 @@ def rebuild_address_book(
         if not isinstance(wallet, dict):
             raise WalletError(f'wallet "{wallet_name}" does not exist')
 
-        mnemonic = _read_mnemonic(wallet_name, wallet, password)
-        _validate_mnemonic(mnemonic)
-        next_index, base_path = _read_derivation_state(wallet)
+        _ensure_account_metadata(wallet_name, wallet, password)
+        account_xpub, account_path, next_receive_index = _read_public_derivation_state(
+            wallet,
+            BTC_RECEIVE_BRANCH,
+        )
+        _, _, next_change_index = _read_public_derivation_state(
+            wallet,
+            BTC_CHANGE_BRANCH,
+        )
         existing_entries = wallet.get("issued_addresses", [])
         if not isinstance(existing_entries, list):
             raise WalletError("wallet address book is invalid")
 
         existing_by_index = {
-            entry["index"]: entry
+            (_entry_branch(entry), entry["index"]): entry
             for entry in existing_entries
             if isinstance(entry, dict) and isinstance(entry.get("index"), int)
         }
         rebuilt_entries = []
         recovered_at = _utc_now()
         recovered_count = 0
-        for index in range(next_index):
-            existing = existing_by_index.get(index, {})
-            created_at = existing.get("created_at")
-            label = existing.get("label", "")
-            if not isinstance(created_at, str):
-                created_at = None
-            if not isinstance(label, str):
-                label = ""
-            entry = _derive_address_entry(mnemonic, base_path, index, created_at, label)
-            if created_at is None:
-                entry["recovered_at"] = recovered_at
-                recovered_count += 1
-            rebuilt_entries.append(entry)
+        for branch, next_index in (
+            (BTC_RECEIVE_BRANCH, next_receive_index),
+            (BTC_CHANGE_BRANCH, next_change_index),
+        ):
+            for index in range(next_index):
+                existing = existing_by_index.get((branch, index), {})
+                created_at = existing.get("created_at")
+                label = existing.get("label", "")
+                if not isinstance(created_at, str):
+                    created_at = None
+                if not isinstance(label, str):
+                    label = ""
+                entry = _derive_address_entry_from_xpub(
+                    account_xpub,
+                    account_path,
+                    branch,
+                    index,
+                    created_at,
+                    label,
+                )
+                if created_at is None:
+                    entry["recovered_at"] = recovered_at
+                    recovered_count += 1
+                rebuilt_entries.append(entry)
 
         wallet["issued_addresses"] = rebuilt_entries
         _save_wallets(wallets, path)

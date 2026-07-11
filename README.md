@@ -6,7 +6,7 @@ You can use this tool to complete the following task
 - Generate compressed/uncompressed public keys and P2PKH addresses from a private key
 - Generate P2PKH, P2WPKH, P2SH-P2WPKH, and P2TR addresses from a compressed public key
 - Generate a P2PKH address from an uncompressed public key
-- Create encrypted or plaintext BIP39/BIP84 wallets and derive P2WPKH addresses
+- Create encrypted or plaintext BIP39/BIP84 wallets and derive P2WPKH addresses from an account xpub
 
 ## Operating environment
 - Python version: 3.12.6, other versions should also work.
@@ -63,12 +63,27 @@ $ python bitcoin_tool.py createwallet --wallet-name "unsafe_test_wallet"
 
 - derive successive P2WPKH receiving addresses
 ```bash
-$ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01" --password "test-password"
+$ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01"
+```
+
+- derive a P2WPKH change address
+```bash
+$ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01" --change
+```
+
+- export the BIP84 account xpub
+```bash
+$ python bitcoin_tool.py exportxpub --wallet-name "my_BTC_01" --password "test-password"
+```
+
+- derive a P2WPKH address from an external account xpub
+```bash
+$ python bitcoin_tool.py derivepub --xpub "xpub..." --branch 0 --index 0
 ```
 
 - rebuild issued address records from the deterministic wallet state
 ```bash
-$ python bitcoin_tool.py rebuildaddressbook --wallet-name "my_BTC_01" --password "test-password"
+$ python bitcoin_tool.py rebuildaddressbook --wallet-name "my_BTC_01"
 ```
 
 Wallet data is stored outside the source tree by default:
@@ -78,6 +93,10 @@ Wallet data is stored outside the source tree by default:
 - macOS: `~/Library/Application Support/bitcoin-tool/wallets.json`
 
 Use `--datadir PATH` on a wallet command, or set `BITCOIN_TOOL_DATADIR`, to override this location. Each issued address is recorded as public metadata in `issued_addresses`; private keys are never stored separately.
+
+New wallets store the BIP84 account xpub (`m/84'/0'/0'`) so `getnewaddress` and `rebuildaddressbook` do not need to decrypt the mnemonic. The account xpub cannot spend coins, but it can reveal every receiving and change address in that account. Keep it private unless you intentionally need a watch-only setup.
+
+Older encrypted wallet files without `account_xpub` need the password once during the next address operation so the tool can upgrade the wallet metadata. After that, normal address derivation uses the stored account xpub.
 
 Existing `wallets.json` files in the project root are not moved automatically. Move the file to the user data directory, or use `--datadir` with the old directory explicitly.
 
