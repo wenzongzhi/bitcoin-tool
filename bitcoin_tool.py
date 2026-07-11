@@ -156,7 +156,6 @@ def cmd_getnewaddress(args):
     try:
         result = get_new_address(
             wallet_name=args.wallet_name,
-            password=args.password,
             wallet_file=default_wallet_file(args.datadir),
             change=args.change,
         )
@@ -191,7 +190,6 @@ def cmd_rebuildaddressbook(args):
     try:
         result = rebuild_address_book(
             wallet_name=args.wallet_name,
-            password=args.password,
             wallet_file=default_wallet_file(args.datadir),
         )
     except WalletError as exc:
@@ -241,10 +239,6 @@ def cmd_derivepub(args):
 
 def add_wallet_access_arguments(parser):
     parser.add_argument("--wallet-name", required=True, help="wallet name")
-    parser.add_argument(
-        "--password",
-        help="password, required only when upgrading a legacy encrypted wallet",
-    )
     parser.add_argument(
         "--datadir",
         help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",

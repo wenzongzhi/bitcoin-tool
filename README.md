@@ -94,9 +94,7 @@ Wallet data is stored outside the source tree by default:
 
 Use `--datadir PATH` on a wallet command, or set `BITCOIN_TOOL_DATADIR`, to override this location. Each issued address is recorded as public metadata in `issued_addresses`; private keys are never stored separately.
 
-New wallets store the BIP84 account xpub (`m/84'/0'/0'`) so `getnewaddress` and `rebuildaddressbook` do not need to decrypt the mnemonic. The account xpub cannot spend coins, but it can reveal every receiving and change address in that account. Keep it private unless you intentionally need a watch-only setup.
-
-Older encrypted wallet files without `account_xpub` need the password once during the next address operation so the tool can upgrade the wallet metadata. After that, normal address derivation uses the stored account xpub.
+Wallets store the BIP84 account xpub (`m/84'/0'/0'`) so `getnewaddress` and `rebuildaddressbook` do not need to decrypt the mnemonic. The account xpub cannot spend coins, but it can reveal every receiving and change address in that account. Keep it private unless you intentionally need a watch-only setup.
 
 Existing `wallets.json` files in the project root are not moved automatically. Move the file to the user data directory, or use `--datadir` with the old directory explicitly.
 
