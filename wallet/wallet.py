@@ -261,8 +261,6 @@ def get_mnemonic(
     wallet_file: Path | None = None,
 ) -> dict:
     _validate_wallet_name(wallet_name)
-    if not password:
-        raise WalletError("password is required")
 
     path = wallet_file or default_wallet_file()
     with _locked_wallet_file(path):
@@ -271,8 +269,7 @@ def get_mnemonic(
 
         if not isinstance(wallet, dict):
             raise WalletError(f'wallet "{wallet_name}" does not exist in "{path}"')
-        if not wallet.get("encrypted"):
-            raise WalletError("wallet mnemonic is not encrypted")
+
         mnemonic = _read_mnemonic(wallet_name, wallet, password)
         _validate_mnemonic(mnemonic)
 

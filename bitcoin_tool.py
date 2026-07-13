@@ -328,8 +328,7 @@ def main():
     p_getmnemonic.add_argument("--wallet-name", required=True, help="wallet name")
     p_getmnemonic.add_argument(
         "--password",
-        required=True,
-        help="password for the encrypted wallet",
+        help="password for an encrypted wallet",
     )
     p_getmnemonic.add_argument(
         "--datadir",
