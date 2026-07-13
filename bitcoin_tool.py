@@ -15,6 +15,8 @@ limitations under the License.
 """
 
 import argparse
+import cmd
+import shlex
 import sys
 from pathlib import Path
 from btc.hash import sha256, dbl_sha256, sha256_file, dbl_sha256_file, show
@@ -236,6 +238,114 @@ def cmd_derivepub(args):
     print("relative path:", f"m/{args.branch}/{args.index}")
     print("address      :", address)
 
+def _split_shell_arguments(argument_line: str) -> list[str] | None:
+    """
+    Split an interactive command line into argparse-compatible arguments.
+
+    posix=False is used so Windows paths such as D:\\wallets are not
+    interpreted as strings containing escape characters.
+    """
+    try:
+        arguments = shlex.split(argument_line, posix=False)
+    except ValueError as exc:
+        print(f"invalid command line: {exc}", file=sys.stderr)
+        return None
+
+    # With posix=False, shlex preserves surrounding quotation marks.
+    # Remove one pair so argparse receives my_BTC_001 instead of
+    # "my_BTC_001".
+    normalized_arguments = []
+
+    for argument in arguments:
+        if (
+            len(argument) >= 2
+            and argument[0] == argument[-1]
+            and argument[0] in {'"', "'"}
+        ):
+            argument = argument[1:-1]
+
+        normalized_arguments.append(argument)
+
+    return normalized_arguments
+
+
+class BitcoinToolShell(cmd.Cmd):
+    intro = (
+        "Bitcoin Tool interactive shell\n"
+        "Powered by Wen Zhongzhi\n"
+        'Type "help" to show commands and "exit" to quit.'
+    )
+    prompt = "bitcoin-tool> "
+
+    def emptyline(self) -> None:
+        # cmd.Cmd normally repeats the previous command on an empty line.
+        # For a wallet tool, doing nothing is safer.
+        pass
+
+    def _run_command(self, command: str, argument_line: str) -> None:
+        arguments = _split_shell_arguments(argument_line)
+
+        if arguments is None:
+            return
+
+        try:
+            run_cli([command, *arguments])
+        except SystemExit:
+            # argparse uses SystemExit for --help and argument errors.
+            # Do not exit the interactive shell.
+            pass
+
+    def do_hash(self, argument_line: str) -> None:
+        """Hash an ASCII string, hexadecimal string, or file."""
+        self._run_command("hash", argument_line)
+
+    def do_gen(self, argument_line: str) -> None:
+        """Generate a random 32-byte private key."""
+        self._run_command("gen", argument_line)
+
+    def do_addr(self, argument_line: str) -> None:
+        """Generate Bitcoin addresses from a private or public key."""
+        self._run_command("addr", argument_line)
+
+    def do_createwallet(self, argument_line: str) -> None:
+        """Create a BIP84 wallet."""
+        self._run_command("createwallet", argument_line)
+
+    def do_getnewaddress(self, argument_line: str) -> None:
+        """Derive the next wallet address."""
+        self._run_command("getnewaddress", argument_line)
+
+    def do_getmnemonic(self, argument_line: str) -> None:
+        """Decrypt and display a wallet mnemonic."""
+        self._run_command("getmnemonic", argument_line)
+
+    def do_rebuildaddressbook(self, argument_line: str) -> None:
+        """Rebuild wallet address metadata."""
+        self._run_command("rebuildaddressbook", argument_line)
+
+    def do_exportxpub(self, argument_line: str) -> None:
+        """Export a wallet account xpub."""
+        self._run_command("exportxpub", argument_line)
+
+    def do_derivepub(self, argument_line: str) -> None:
+        """Derive an address from an account xpub."""
+        self._run_command("derivepub", argument_line)
+
+    def do_exit(self, argument_line: str) -> bool:
+        """Exit the interactive shell."""
+        return True
+
+    def do_quit(self, argument_line: str) -> bool:
+        """Exit the interactive shell."""
+        return True
+
+    def do_EOF(self, argument_line: str) -> bool:
+        """Exit when Ctrl+Z followed by Enter is entered on Windows."""
+        print()
+        return True
+
+def cmd_shell(args) -> None:
+    BitcoinToolShell().cmdloop()
 
 def add_wallet_access_arguments(parser):
     parser.add_argument("--wallet-name", required=True, help="wallet name")
@@ -244,8 +354,7 @@ def add_wallet_access_arguments(parser):
         help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",
     )
 
-
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bitcoin_tool",
         description="Bitcoin research CLI tool: hash / keys / address / scripts"
@@ -385,8 +494,25 @@ def main():
     p_derivepub.add_argument("--index", type=int, required=True)
     p_derivepub.set_defaults(func=cmd_derivepub, parser=p_derivepub)
 
-    args = parser.parse_args()
+    # shell
+    p_shell = sub.add_parser(
+        "shell",
+        help="start the interactive shell with command completion",
+    )
+    p_shell.set_defaults(
+        func=cmd_shell,
+        parser=p_shell,
+    )
+
+    return parser
+
+def run_cli(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
     args.func(args)
+
+def main() -> None:
+    run_cli()
 
 if __name__ == "__main__":
     main()
