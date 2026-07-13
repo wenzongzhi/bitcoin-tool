@@ -16,8 +16,10 @@ limitations under the License.
 
 import argparse
 import cmd
+import re
 import shlex
 import sys
+from functools import lru_cache
 from pathlib import Path
 from btc.hash import sha256, dbl_sha256, sha256_file, dbl_sha256_file, show
 from btc.private_key_gen import generate_32bytes_private_key, is_valid_privkey
@@ -41,6 +43,21 @@ from wallet import (
     get_new_address,
     rebuild_address_book,
 )
+
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.lexers import Lexer
+    from prompt_toolkit.styles import Style
+except ImportError:
+    PromptSession = None
+    Completer = object
+    Completion = None
+    HTML = None
+    Lexer = object
+    Style = None
+
 
 def cmd_hash(args):
     parser = args.parser
@@ -238,6 +255,225 @@ def cmd_derivepub(args):
     print("relative path:", f"m/{args.branch}/{args.index}")
     print("address      :", address)
 
+
+SHELL_BUILTIN_COMMANDS = {
+    "exit": "Exit the interactive shell.",
+    "quit": "Exit the interactive shell.",
+    "help": "Show shell or command help.",
+}
+
+
+def _find_subparsers_action(parser: argparse.ArgumentParser):
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action
+    return None
+
+
+@lru_cache(maxsize=1)
+def _shell_completion_index() -> tuple[dict[str, argparse.ArgumentParser], dict[str, list[str]]]:
+    parser = build_parser()
+    subparsers_action = _find_subparsers_action(parser)
+    if subparsers_action is None:
+        return {}, {}
+
+    command_parsers = dict(subparsers_action.choices)
+    options_by_command = {}
+    for command, command_parser in command_parsers.items():
+        options = []
+        for action in command_parser._actions:
+            options.extend(action.option_strings)
+        options_by_command[command] = sorted(options)
+    return command_parsers, options_by_command
+
+
+def _split_completion_arguments(text: str) -> list[str]:
+    try:
+        return shlex.split(text, posix=False)
+    except ValueError:
+        return text.split()
+
+
+def _current_completion_prefix(text_before_cursor: str) -> str:
+    if not text_before_cursor or text_before_cursor[-1].isspace():
+        return ""
+    return text_before_cursor.rsplit(maxsplit=1)[-1]
+
+
+def _shell_option_matches(command: str, prefix: str) -> list[str]:
+    _, options_by_command = _shell_completion_index()
+    return [
+        option
+        for option in options_by_command.get(command, [])
+        if option.startswith(prefix)
+    ]
+
+
+def _shell_command_matches(prefix: str) -> list[str]:
+    command_parsers, _ = _shell_completion_index()
+    commands = sorted(
+        [
+            command
+            for command in [*command_parsers, *SHELL_BUILTIN_COMMANDS]
+            if command != "shell"
+        ]
+    )
+    return [command for command in commands if command.startswith(prefix)]
+
+
+def _print_shell_help(command: str | None = None) -> None:
+    command_parsers, _ = _shell_completion_index()
+    if command:
+        if command in command_parsers:
+            command_parsers[command].print_help()
+            return
+        if command in SHELL_BUILTIN_COMMANDS:
+            print(f"{command}: {SHELL_BUILTIN_COMMANDS[command]}")
+            return
+        print(f'unknown command: "{command}"', file=sys.stderr)
+        return
+
+    print("Available commands:")
+    help_by_command = {}
+    subparser_action = _find_subparsers_action(build_parser())
+    if subparser_action is not None:
+        help_by_command = {
+            choice_action.dest: choice_action.help
+            for choice_action in subparser_action._choices_actions
+        }
+    for name in sorted(command for command in command_parsers if command != "shell"):
+        print(f"  {name:<20} {help_by_command.get(name, '')}")
+    for name, help_text in SHELL_BUILTIN_COMMANDS.items():
+        print(f"  {name:<20} {help_text}")
+    print('\nUse "help <command>" for command-specific options.')
+
+
+class BitcoinToolCompleter(Completer):
+    def get_completions(self, document, complete_event):
+        text_before_cursor = document.text_before_cursor
+        stripped = text_before_cursor.lstrip()
+        prefix = _current_completion_prefix(text_before_cursor)
+        words = _split_completion_arguments(stripped)
+
+        completing_first_token = (
+            not words
+            or (len(words) == 1 and not text_before_cursor[-1:].isspace())
+        )
+        if completing_first_token:
+            for command in _shell_command_matches(prefix):
+                yield Completion(command, start_position=-len(prefix))
+            return
+
+        command = words[0]
+        if command == "help":
+            for candidate in _shell_command_matches(prefix):
+                yield Completion(candidate, start_position=-len(prefix))
+            return
+
+        for option in _shell_option_matches(command, prefix):
+            yield Completion(option, start_position=-len(prefix))
+
+
+class BitcoinToolLexer(Lexer):
+    _token_pattern = re.compile(r"\s+|\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|\S+")
+    _hex_pattern = re.compile(r"(?:0x)?[0-9a-fA-F]{16,}")
+    _number_pattern = re.compile(r"\d+")
+
+    def lex_document(self, document):
+        command_parsers, _ = _shell_completion_index()
+
+        def get_line(lineno: int):
+            try:
+                line = document.lines[lineno]
+            except IndexError:
+                return []
+
+            fragments = []
+            command_seen = False
+            for match in self._token_pattern.finditer(line):
+                token = match.group(0)
+                if token.isspace():
+                    fragments.append(("", token))
+                    continue
+
+                if not command_seen:
+                    style = (
+                        "class:command"
+                        if token in command_parsers or token in SHELL_BUILTIN_COMMANDS
+                        else "class:error"
+                    )
+                    command_seen = True
+                elif token.startswith("-"):
+                    style = "class:option"
+                elif token.startswith(("\"", "'")):
+                    style = "class:string"
+                elif self._number_pattern.fullmatch(token):
+                    style = "class:number"
+                elif self._hex_pattern.fullmatch(token):
+                    style = "class:hex"
+                else:
+                    style = "class:value"
+                fragments.append((style, token))
+            return fragments
+
+        return get_line
+
+
+def _run_prompt_toolkit_shell() -> None:
+    style = Style.from_dict(
+        {
+            "prompt": "ansigreen bold",
+            "command": "ansicyan bold",
+            "option": "ansigreen",
+            "string": "ansiblue",
+            "number": "ansiyellow",
+            "hex": "ansimagenta",
+            "value": "ansiwhite",
+            "error": "ansired",
+        }
+    )
+    session = PromptSession(
+        lexer=BitcoinToolLexer(),
+        completer=BitcoinToolCompleter(),
+        complete_while_typing=True,
+        style=style,
+    )
+    print("Bitcoin Tool interactive shell")
+    print("Powered by Wen Zhongzhi")
+    print('Type "help" to show commands and "exit" to quit.')
+
+    while True:
+        try:
+            command_line = session.prompt(HTML("<prompt>bitcoin-tool&gt; </prompt>"))
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        stripped = command_line.strip()
+        if not stripped:
+            continue
+
+        arguments = _split_shell_arguments(stripped)
+        if arguments is None:
+            continue
+
+        command = arguments[0]
+        command_arguments = arguments[1:]
+        if command in {"exit", "quit"}:
+            break
+        if command == "help":
+            _print_shell_help(command_arguments[0] if command_arguments else None)
+            continue
+        if command == "shell":
+            print("already in interactive shell", file=sys.stderr)
+            continue
+
+        try:
+            run_cli([command, *command_arguments])
+        except SystemExit:
+            pass
+
+
 def _split_shell_arguments(argument_line: str) -> list[str] | None:
     """
     Split an interactive command line into argparse-compatible arguments.
@@ -295,9 +531,24 @@ class BitcoinToolShell(cmd.Cmd):
             # Do not exit the interactive shell.
             pass
 
+    def _complete_options(self, command: str, text: str) -> list[str]:
+        return _shell_option_matches(command, text)
+
+    def completenames(self, text: str, *ignored) -> list[str]:
+        return [f"{command} " for command in _shell_command_matches(text)]
+
+    def do_help(self, argument_line: str) -> None:
+        arguments = _split_shell_arguments(argument_line)
+        if arguments is None:
+            return
+        _print_shell_help(arguments[0] if arguments else None)
+
     def do_hash(self, argument_line: str) -> None:
         """Hash an ASCII string, hexadecimal string, or file."""
         self._run_command("hash", argument_line)
+
+    def complete_hash(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("hash", text)
 
     def do_gen(self, argument_line: str) -> None:
         """Generate a random 32-byte private key."""
@@ -307,29 +558,50 @@ class BitcoinToolShell(cmd.Cmd):
         """Generate Bitcoin addresses from a private or public key."""
         self._run_command("addr", argument_line)
 
+    def complete_addr(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("addr", text)
+
     def do_createwallet(self, argument_line: str) -> None:
         """Create a BIP84 wallet."""
         self._run_command("createwallet", argument_line)
+
+    def complete_createwallet(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("createwallet", text)
 
     def do_getnewaddress(self, argument_line: str) -> None:
         """Derive the next wallet address."""
         self._run_command("getnewaddress", argument_line)
 
+    def complete_getnewaddress(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("getnewaddress", text)
+
     def do_getmnemonic(self, argument_line: str) -> None:
-        """Decrypt and display a wallet mnemonic."""
+        """Display a wallet mnemonic."""
         self._run_command("getmnemonic", argument_line)
+
+    def complete_getmnemonic(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("getmnemonic", text)
 
     def do_rebuildaddressbook(self, argument_line: str) -> None:
         """Rebuild wallet address metadata."""
         self._run_command("rebuildaddressbook", argument_line)
 
+    def complete_rebuildaddressbook(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("rebuildaddressbook", text)
+
     def do_exportxpub(self, argument_line: str) -> None:
         """Export a wallet account xpub."""
         self._run_command("exportxpub", argument_line)
 
+    def complete_exportxpub(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("exportxpub", text)
+
     def do_derivepub(self, argument_line: str) -> None:
         """Derive an address from an account xpub."""
         self._run_command("derivepub", argument_line)
+
+    def complete_derivepub(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("derivepub", text)
 
     def do_exit(self, argument_line: str) -> bool:
         """Exit the interactive shell."""
@@ -345,7 +617,10 @@ class BitcoinToolShell(cmd.Cmd):
         return True
 
 def cmd_shell(args) -> None:
-    BitcoinToolShell().cmdloop()
+    if PromptSession is not None:
+        _run_prompt_toolkit_shell()
+    else:
+        BitcoinToolShell().cmdloop()
 
 def add_wallet_access_arguments(parser):
     parser.add_argument("--wallet-name", required=True, help="wallet name")
@@ -432,7 +707,7 @@ def build_parser() -> argparse.ArgumentParser:
     # getmnemonic
     p_getmnemonic = sub.add_parser(
         "getmnemonic",
-        help="decrypt and display an encrypted wallet mnemonic",
+        help="display a wallet mnemonic; encrypted wallets require a password",
     )
     p_getmnemonic.add_argument("--wallet-name", required=True, help="wallet name")
     p_getmnemonic.add_argument(

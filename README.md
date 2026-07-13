@@ -7,6 +7,7 @@ You can use this tool to complete the following task
 - Generate P2PKH, P2WPKH, P2SH-P2WPKH, and P2TR addresses from a compressed public key
 - Generate a P2PKH address from an uncompressed public key
 - Create encrypted or plaintext BIP39/BIP84 wallets and derive P2WPKH addresses from an account xpub
+- Start an interactive `bitcoin-tool shell` with command completion
 
 ## Operating environment
 - Python version: 3.12.6, other versions should also work.
@@ -66,6 +67,11 @@ $ python bitcoin_tool.py getmnemonic --wallet-name "my_BTC_01" --password "test-
 $ python bitcoin_tool.py createwallet --wallet-name "unsafe_test_wallet"
 ```
 
+Plaintext wallets do not require `--password` when displaying the mnemonic:
+```bash
+$ python bitcoin_tool.py getmnemonic --wallet-name "unsafe_test_wallet"
+```
+
 - derive successive P2WPKH receiving addresses
 ```bash
 $ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01"
@@ -90,6 +96,21 @@ $ python bitcoin_tool.py derivepub --xpub "xpub..." --branch 0 --index 0
 ```bash
 $ python bitcoin_tool.py rebuildaddressbook --wallet-name "my_BTC_01"
 ```
+
+- start the interactive shell with completion
+```bash
+$ python bitcoin_tool.py shell
+```
+
+Inside the shell, use the command name without `python bitcoin_tool.py`:
+```text
+bitcoin-tool> hash -s "Satoshi Nakamoto"
+bitcoin-tool> getnewaddress --wallet-name "my_BTC_01"
+bitcoin-tool> help addr
+bitcoin-tool> exit
+```
+
+When `prompt_toolkit` is installed from `requirements.txt`, the shell supports command/option completion and colored input. Commands are cyan, options are green, quoted strings are blue, numbers are yellow, long hexadecimal values are magenta, and unknown commands are red. If `prompt_toolkit` is unavailable, the tool falls back to the basic `cmd` shell with command and option completion but without input coloring.
 
 Wallet data is stored outside the source tree by default:
 

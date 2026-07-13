@@ -5,3 +5,5 @@ ecdsa
 filelock
 mnemonic
 platformdirs
+prompt_toolkit
+pyreadline3; platform_system == "Windows"
