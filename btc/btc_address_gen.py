@@ -123,6 +123,10 @@ def p2wpkh_bech32_address(pubkey_compressed: bytes) -> str:
     return bech32_encode("bc", data)
 
 
+def p2wpkh_script_pubkey(pubkey_compressed: bytes) -> str:
+    return (b"\x00\x14" + hash160(pubkey_compressed)).hex()
+
+
 def p2tr_address(pubkey_compressed: bytes) -> str:
     if len(pubkey_compressed) != 33 or not is_valid_public_key(pubkey_compressed):
         raise ValueError("P2TR requires a compressed secp256k1 public key")

@@ -33,15 +33,21 @@ from btc.btc_address_gen import (
     p2sh_p2wpkh_address,
 )
 from version import __version__
+from network import EsploraBackend, EsploraError
 from wallet import (
     WalletError,
     create_wallet,
+    default_wallet_cache_file,
     default_wallet_file,
     derive_p2wpkh_from_account_xpub,
     export_account_xpub,
+    get_cached_balance,
     get_mnemonic,
     get_new_address,
+    list_cached_transactions,
+    list_cached_unspent,
     rebuild_address_book,
+    sync_wallet,
 )
 
 try:
@@ -254,6 +260,119 @@ def cmd_derivepub(args):
     print("index        :", args.index)
     print("relative path:", f"m/{args.branch}/{args.index}")
     print("address      :", address)
+
+
+def _format_btc(satoshis: int) -> str:
+    return f"{satoshis / 100_000_000:.8f} BTC"
+
+
+def cmd_syncwallet(args):
+    try:
+        result = sync_wallet(
+            wallet_name=args.wallet_name,
+            wallet_file=default_wallet_file(args.datadir),
+            cache_file=default_wallet_cache_file(args.datadir),
+            backend=EsploraBackend(args.backend_url, args.timeout),
+            include_transactions=not args.no_transactions,
+        )
+    except (WalletError, EsploraError) as exc:
+        args.parser.error(str(exc))
+
+    balance = result["balance"]
+    print("wallet name        :", result["wallet_name"])
+    print("synced at          :", result["synced_at"])
+    print("backend            :", result["backend"]["base_url"])
+    print("tip height         :", result["tip"]["height"])
+    print("tip hash           :", result["tip"]["hash"])
+    print("address count      :", result["address_count"])
+    print("used address count :", result["used_address_count"])
+    print("utxo count         :", len(result["utxos"]))
+    print("transaction count  :", len(result["transactions"]))
+    print("confirmed balance  :", balance["confirmed"], "sats", f"({_format_btc(balance['confirmed'])})")
+    print("unconfirmed balance:", balance["unconfirmed"], "sats", f"({_format_btc(balance['unconfirmed'])})")
+    print("total balance      :", balance["total"], "sats", f"({_format_btc(balance['total'])})")
+    print("cache file         :", result["cache_file"])
+
+
+def cmd_getbalance(args):
+    try:
+        result = get_cached_balance(
+            wallet_name=args.wallet_name,
+            cache_file=default_wallet_cache_file(args.datadir),
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+
+    balance = result["balance"]
+    print("wallet name        :", result["wallet_name"])
+    print("synced at          :", result["synced_at"])
+    print("tip height         :", result.get("tip", {}).get("height"))
+    print("confirmed balance  :", balance["confirmed"], "sats", f"({_format_btc(balance['confirmed'])})")
+    print("unconfirmed balance:", balance["unconfirmed"], "sats", f"({_format_btc(balance['unconfirmed'])})")
+    print("total balance      :", balance["total"], "sats", f"({_format_btc(balance['total'])})")
+    print("cache file         :", result["cache_file"])
+
+
+def cmd_listunspent(args):
+    if args.min_confirmations < 0:
+        args.parser.error("--min-confirmations must not be negative")
+    try:
+        result = list_cached_unspent(
+            wallet_name=args.wallet_name,
+            cache_file=default_wallet_cache_file(args.datadir),
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+
+    min_confirmations = args.min_confirmations
+    utxos = [
+        utxo
+        for utxo in result["utxos"]
+        if int(utxo.get("confirmations", 0)) >= min_confirmations
+    ]
+    print("wallet name :", result["wallet_name"])
+    print("synced at   :", result["synced_at"])
+    print("utxo count  :", len(utxos))
+    for utxo in utxos:
+        print()
+        print("txid         :", utxo["txid"])
+        print("vout         :", utxo["vout"])
+        print("value        :", utxo["value"], "sats", f"({_format_btc(utxo['value'])})")
+        print("confirmed    :", "yes" if utxo.get("confirmed") else "no")
+        print("confirmations:", utxo.get("confirmations", 0))
+        print("address      :", utxo["address"])
+        print("path         :", utxo["path"])
+        print("scriptPubKey :", utxo["script_pubkey"])
+
+
+def cmd_listtransactions(args):
+    if args.limit < 0:
+        args.parser.error("--limit must not be negative")
+    try:
+        result = list_cached_transactions(
+            wallet_name=args.wallet_name,
+            cache_file=default_wallet_cache_file(args.datadir),
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+
+    transactions = result["transactions"][: args.limit]
+    print("wallet name        :", result["wallet_name"])
+    print("synced at          :", result["synced_at"])
+    print("transaction count  :", len(result["transactions"]))
+    print("displayed count    :", len(transactions))
+    print("complete history   :", "yes" if result["transactions_complete"] else "no")
+    for tx in transactions:
+        print()
+        print("txid         :", tx["txid"])
+        print("direction    :", tx["direction"])
+        print("net          :", tx["net"], "sats", f"({_format_btc(tx['net'])})")
+        print("received     :", tx["received"], "sats", f"({_format_btc(tx['received'])})")
+        print("sent         :", tx["sent"], "sats", f"({_format_btc(tx['sent'])})")
+        print("fee          :", tx["fee"], "sats", f"({_format_btc(tx['fee'])})")
+        print("confirmed    :", "yes" if tx.get("confirmed") else "no")
+        print("confirmations:", tx.get("confirmations", 0))
+        print("addresses    :", ", ".join(tx.get("addresses", [])))
 
 
 SHELL_BUILTIN_COMMANDS = {
@@ -603,6 +722,34 @@ class BitcoinToolShell(cmd.Cmd):
     def complete_derivepub(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return self._complete_options("derivepub", text)
 
+    def do_syncwallet(self, argument_line: str) -> None:
+        """Sync wallet chain state into the local cache."""
+        self._run_command("syncwallet", argument_line)
+
+    def complete_syncwallet(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("syncwallet", text)
+
+    def do_getbalance(self, argument_line: str) -> None:
+        """Read wallet balance from the local cache."""
+        self._run_command("getbalance", argument_line)
+
+    def complete_getbalance(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("getbalance", text)
+
+    def do_listunspent(self, argument_line: str) -> None:
+        """List cached wallet UTXOs."""
+        self._run_command("listunspent", argument_line)
+
+    def complete_listunspent(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("listunspent", text)
+
+    def do_listtransactions(self, argument_line: str) -> None:
+        """List cached wallet transactions."""
+        self._run_command("listtransactions", argument_line)
+
+    def complete_listtransactions(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("listtransactions", text)
+
     def do_exit(self, argument_line: str) -> bool:
         """Exit the interactive shell."""
         return True
@@ -768,6 +915,66 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_derivepub.add_argument("--index", type=int, required=True)
     p_derivepub.set_defaults(func=cmd_derivepub, parser=p_derivepub)
+
+    # syncwallet
+    p_syncwallet = sub.add_parser(
+        "syncwallet",
+        help="sync wallet UTXOs and transactions into the local cache",
+    )
+    add_wallet_access_arguments(p_syncwallet)
+    p_syncwallet.add_argument(
+        "--backend-url",
+        default="https://blockstream.info/api",
+        help="Esplora API base URL",
+    )
+    p_syncwallet.add_argument(
+        "--timeout",
+        type=int,
+        default=20,
+        help="network timeout in seconds",
+    )
+    p_syncwallet.add_argument(
+        "--no-transactions",
+        action="store_true",
+        help="skip transaction history and sync only address stats and UTXOs",
+    )
+    p_syncwallet.set_defaults(func=cmd_syncwallet, parser=p_syncwallet)
+
+    # getbalance
+    p_getbalance = sub.add_parser(
+        "getbalance",
+        help="read wallet balance from the local cache",
+    )
+    add_wallet_access_arguments(p_getbalance)
+    p_getbalance.set_defaults(func=cmd_getbalance, parser=p_getbalance)
+
+    # listunspent
+    p_listunspent = sub.add_parser(
+        "listunspent",
+        help="list cached wallet UTXOs",
+    )
+    add_wallet_access_arguments(p_listunspent)
+    p_listunspent.add_argument(
+        "--min-confirmations",
+        type=int,
+        default=0,
+        help="minimum number of confirmations to display",
+    )
+    p_listunspent.set_defaults(func=cmd_listunspent, parser=p_listunspent)
+
+    # listtransactions
+    p_listtransactions = sub.add_parser(
+        "listtransactions",
+        help="list cached wallet transactions",
+    )
+    add_wallet_access_arguments(p_listtransactions)
+    p_listtransactions.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="maximum number of transactions to display",
+    )
+    p_listtransactions.set_defaults(func=cmd_listtransactions, parser=p_listtransactions)
 
     # shell
     p_shell = sub.add_parser(

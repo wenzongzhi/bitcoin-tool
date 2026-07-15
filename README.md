@@ -7,6 +7,7 @@ You can use this tool to complete the following task
 - Generate P2PKH, P2WPKH, P2SH-P2WPKH, and P2TR addresses from a compressed public key
 - Generate a P2PKH address from an uncompressed public key
 - Create encrypted or plaintext BIP39/BIP84 wallets and derive P2WPKH addresses from an account xpub
+- Sync issued wallet addresses through an Esplora API and cache balance, UTXOs, and transactions
 - Start an interactive `bitcoin-tool shell` with command completion
 
 ## Operating environment
@@ -97,6 +98,33 @@ $ python bitcoin_tool.py derivepub --xpub "xpub..." --branch 0 --index 0
 $ python bitcoin_tool.py rebuildaddressbook --wallet-name "my_BTC_01"
 ```
 
+- sync issued wallet addresses through the default Esplora backend
+```bash
+$ python bitcoin_tool.py syncwallet --wallet-name "my_BTC_01"
+```
+
+- sync through a self-hosted Esplora backend
+```bash
+$ python bitcoin_tool.py syncwallet --wallet-name "my_BTC_01" --backend-url "http://127.0.0.1:3002/api"
+```
+
+- read cached wallet balance
+```bash
+$ python bitcoin_tool.py getbalance --wallet-name "my_BTC_01"
+```
+
+- list cached spendable UTXOs
+```bash
+$ python bitcoin_tool.py listunspent --wallet-name "my_BTC_01"
+$ python bitcoin_tool.py listunspent --wallet-name "my_BTC_01" --min-confirmations 1
+```
+
+- list cached wallet transactions
+```bash
+$ python bitcoin_tool.py listtransactions --wallet-name "my_BTC_01"
+$ python bitcoin_tool.py listtransactions --wallet-name "my_BTC_01" --limit 50
+```
+
 - start the interactive shell with completion
 ```bash
 $ python bitcoin_tool.py shell
@@ -121,6 +149,12 @@ Wallet data is stored outside the source tree by default:
 Use `--datadir PATH` on a wallet command, or set `BITCOIN_TOOL_DATADIR`, to override this location. Each issued address is recorded as public metadata in `issued_addresses`; private keys are never stored separately.
 
 Wallets store the BIP84 account xpub (`m/84'/0'/0'`) so `getnewaddress` and `rebuildaddressbook` do not need to decrypt the mnemonic. The account xpub cannot spend coins, but it can reveal every receiving and change address in that account. Keep it private unless you intentionally need a watch-only setup.
+
+`syncwallet` reads issued addresses from `wallets.json`, queries an Esplora-compatible backend, and writes public chain state into `wallet_cache.json` in the same data directory. `getbalance`, `listunspent`, and `listtransactions` read only this cache and do not perform network requests.
+
+Only addresses already created by `getnewaddress` are synced. If you used addresses outside this tool's issued address book, create or rebuild the address records first.
+
+The default sync backend is Blockstream's public Esplora API at `https://blockstream.info/api`. Querying a public backend reveals the wallet addresses you ask about to that backend. For better privacy, use `--backend-url` with a trusted or self-hosted Esplora server.
 
 Existing `wallets.json` files in the project root are not moved automatically. Move the file to the user data directory, or use `--datadir` with the old directory explicitly.
 
