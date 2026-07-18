@@ -3,6 +3,7 @@ This is a open source bitcoin tool.
 You can use this tool to complete the following task
 - Calculate the hash value of any file and any string
 - Generate a 32 bytes (256 bit) Bitcoin private key
+- Convert between BIP39 entropy hex and mnemonic words
 - Generate compressed/uncompressed public keys and P2PKH addresses from a private key
 - Generate P2PKH, P2WPKH, P2SH-P2WPKH, and P2TR addresses from a compressed public key
 - Generate a P2PKH address from an uncompressed public key
@@ -58,9 +59,24 @@ $ python bitcoin_tool.py createwallet --wallet-name "my_BTC_01" --password "test
 $ python bitcoin_tool.py createwallet --wallet-name "my_BTC_02" --entropy-hex "0000000000000000000000000000000000000000000000000000000000000000" --password "test-password"
 ```
 
+- create a wallet by importing a BIP39 mnemonic
+```bash
+$ python bitcoin_tool.py createwallet --wallet-name "imported_BTC_01" --mnemonic "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art" --password "test-password"
+```
+
 Encrypted wallet creation does not print the mnemonic. Use the explicit command below when it must be viewed:
 ```bash
 $ python bitcoin_tool.py getmnemonic --wallet-name "my_BTC_01" --password "test-password"
+```
+
+- convert BIP39 entropy hex to mnemonic words
+```bash
+$ python bitcoin_tool.py convert --entropy-hex-to-mnemonic "00000000000000000000000000000000"
+```
+
+- convert BIP39 mnemonic words back to entropy hex
+```bash
+$ python bitcoin_tool.py convert --mnemonic-to-entropy-hex "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 ```
 
 - create a plaintext wallet for experiments only

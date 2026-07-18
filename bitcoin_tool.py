@@ -41,11 +41,13 @@ from wallet import (
     default_wallet_file,
     derive_p2wpkh_from_account_xpub,
     export_account_xpub,
+    entropy_hex_from_mnemonic,
     get_cached_balance,
     get_mnemonic,
     get_new_address,
     list_cached_transactions,
     list_cached_unspent,
+    mnemonic_from_entropy_hex,
     rebuild_address_book,
     sync_wallet,
 )
@@ -159,6 +161,7 @@ def cmd_createwallet(args):
             wallet_name=args.wallet_name,
             password=args.password,
             entropy_hex=args.entropy_hex,
+            mnemonic=args.mnemonic,
             wallet_file=default_wallet_file(args.datadir),
         )
     except WalletError as exc:
@@ -175,6 +178,20 @@ def cmd_createwallet(args):
         print("mnemonic    :", result["mnemonic"])
     print("encrypted   :", "yes" if result["encrypted"] else "no")
     print("wallet file :", result["wallet_file"])
+
+
+def cmd_convert(args):
+    try:
+        if args.entropy_hex is not None:
+            mnemonic = mnemonic_from_entropy_hex(args.entropy_hex)
+            print("entropy hex :", args.entropy_hex.lower())
+            print("mnemonic    :", mnemonic)
+        else:
+            entropy_hex = entropy_hex_from_mnemonic(args.mnemonic)
+            print("mnemonic    :", " ".join(args.mnemonic.strip().split()))
+            print("entropy hex :", entropy_hex)
+    except WalletError as exc:
+        args.parser.error(str(exc))
 
 
 def cmd_getnewaddress(args):
@@ -401,6 +418,8 @@ def _shell_completion_index() -> tuple[dict[str, argparse.ArgumentParser], dict[
     for command, command_parser in command_parsers.items():
         options = []
         for action in command_parser._actions:
+            if action.help == argparse.SUPPRESS:
+                continue
             options.extend(action.option_strings)
         options_by_command[command] = sorted(options)
     return command_parsers, options_by_command
@@ -687,6 +706,13 @@ class BitcoinToolShell(cmd.Cmd):
     def complete_createwallet(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return self._complete_options("createwallet", text)
 
+    def do_convert(self, argument_line: str) -> None:
+        """Convert between BIP39 entropy and mnemonic."""
+        self._run_command("convert", argument_line)
+
+    def complete_convert(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("convert", text)
+
     def do_getnewaddress(self, argument_line: str) -> None:
         """Derive the next wallet address."""
         self._run_command("getnewaddress", argument_line)
@@ -802,6 +828,24 @@ def build_parser() -> argparse.ArgumentParser:
     # gen
     p_gen = sub.add_parser("gen", help="generate random 32-byte private key")
     p_gen.set_defaults(func=cmd_gen)
+
+    # convert
+    p_convert = sub.add_parser(
+        "convert",
+        help="convert between BIP39 entropy hex and mnemonic words",
+    )
+    convert_input = p_convert.add_mutually_exclusive_group(required=True)
+    convert_input.add_argument(
+        "--entropy-hex-to-mnemonic",
+        dest="entropy_hex",
+        help="BIP39 entropy hex: 128, 160, 192, 224, or 256 bits",
+    )
+    convert_input.add_argument(
+        "--mnemonic-to-entropy-hex",
+        dest="mnemonic",
+        help="BIP39 mnemonic words",
+    )
+    p_convert.set_defaults(func=cmd_convert, parser=p_convert)
     
     # addr
     p_addr = sub.add_parser("addr", help="private/public key -> Bitcoin addresses")
@@ -824,9 +868,14 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="wallet name (letters, numbers, underscores, and hyphens)",
     )
-    p_createwallet.add_argument(
+    wallet_seed_input = p_createwallet.add_mutually_exclusive_group()
+    wallet_seed_input.add_argument(
         "--entropy-hex",
         help="optional 256-bit entropy (64 hex characters)",
+    )
+    wallet_seed_input.add_argument(
+        "--mnemonic",
+        help="import BIP39 mnemonic words",
     )
     p_createwallet.add_argument(
         "--password",

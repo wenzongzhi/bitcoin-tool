@@ -133,18 +133,40 @@ def _validate_wallet_name(wallet_name: str) -> None:
         )
 
 
+def mnemonic_from_entropy_hex(entropy_hex: str) -> str:
+    try:
+        entropy = bytes.fromhex(entropy_hex)
+    except ValueError as exc:
+        raise WalletError("entropy contains invalid hexadecimal characters") from exc
+    try:
+        return Mnemonic("english").to_mnemonic(entropy)
+    except ValueError as exc:
+        raise WalletError("entropy must be 128, 160, 192, 224, or 256 bits") from exc
+
+
+def entropy_hex_from_mnemonic(mnemonic: str) -> str:
+    normalized_mnemonic = normalize_mnemonic(mnemonic)
+    try:
+        return Mnemonic("english").to_entropy(normalized_mnemonic).hex()
+    except ValueError as exc:
+        raise WalletError("mnemonic is invalid") from exc
+
+
+def normalize_mnemonic(mnemonic: str) -> str:
+    normalized_mnemonic = " ".join(mnemonic.strip().split())
+    if not Mnemonic("english").check(normalized_mnemonic):
+        raise WalletError("mnemonic is invalid")
+    return normalized_mnemonic
+
+
 def _mnemonic_from_entropy(entropy_hex: str | None) -> str:
     if entropy_hex is None:
         entropy = secrets.token_bytes(32)
-    else:
-        if len(entropy_hex) != 64:
-            raise WalletError("entropy must be exactly 256 bits (64 hex characters)")
-        try:
-            entropy = bytes.fromhex(entropy_hex)
-        except ValueError as exc:
-            raise WalletError("entropy contains invalid hexadecimal characters") from exc
+        return Mnemonic("english").to_mnemonic(entropy)
 
-    return Mnemonic("english").to_mnemonic(entropy)
+    if len(entropy_hex) != 64:
+        raise WalletError("entropy must be exactly 256 bits (64 hex characters)")
+    return mnemonic_from_entropy_hex(entropy_hex)
 
 
 def _derive_account_metadata(mnemonic: str) -> dict:
@@ -161,13 +183,20 @@ def create_wallet(
     password: str | None = None,
     entropy_hex: str | None = None,
     wallet_file: Path | None = None,
+    *,
+    mnemonic: str | None = None,
 ) -> dict:
     _validate_wallet_name(wallet_name)
     if password == "":
         raise WalletError("password must not be empty; omit it to create a plaintext wallet")
+    if entropy_hex is not None and mnemonic is not None:
+        raise WalletError("entropy and mnemonic are mutually exclusive")
 
     path = wallet_file or default_wallet_file()
-    mnemonic = _mnemonic_from_entropy(entropy_hex)
+    if mnemonic is not None:
+        mnemonic = normalize_mnemonic(mnemonic)
+    else:
+        mnemonic = _mnemonic_from_entropy(entropy_hex)
     account_metadata = _derive_account_metadata(mnemonic)
     wallet = {
         "version": 2,
