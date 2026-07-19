@@ -1037,7 +1037,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     return parser
 
-def run_cli(argv: list[str] | None = None) -> None:
+def run_cli(argv: list[str] | None = None) -> None:    
+    if argv is None:
+        argv = sys.argv[1:]
+
+    if not argv:
+        argv = ["shell"]
+        
     parser = build_parser()
     args = parser.parse_args(argv)
     args.func(args)
