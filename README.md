@@ -7,6 +7,7 @@ You can use this tool to complete the following task
 - Generate compressed/uncompressed public keys and P2PKH addresses from a private key
 - Generate P2PKH, P2WPKH, P2SH-P2WPKH, and P2TR addresses from a compressed public key
 - Generate a P2PKH address from an uncompressed public key
+- Sign and verify messages with raw secp256k1 ECDSA signatures
 - Create encrypted or plaintext BIP39/BIP84 wallets and derive P2WPKH addresses from an account xpub
 - Sync issued wallet addresses through an Esplora API and cache balance, UTXOs, and transactions
 - Start an interactive `bitcoin-tool shell` with command completion
@@ -51,6 +52,16 @@ $ python bitcoin_tool.py addr --private-key-hex "1415926535897932384626433832795
 - generate addresses from a compressed or uncompressed public key
 ```bash
 $ python bitcoin_tool.py addr --public-key-hex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+```
+
+- sign a message with raw ECDSA over secp256k1
+```bash
+$ python bitcoin_tool.py ecdsa-sign --private-key-hex "0000000000000000000000000000000000000000000000000000000000000001" --message "hello"
+```
+
+- verify a raw ECDSA message signature
+```bash
+$ python bitcoin_tool.py ecdsa-verify --public-key-hex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" --message "hello" --sign "304402200f2fff8620d8ffe97040f8cf72ae476ef8ff4412373929c0324ce8428d3352e702201845ae4903027667005846f8f0be3e5ed2db5c3826ba83a6e542e080792f9a9d"
 ```
 
 - create an AES-encrypted wallet with optional 256-bit entropy
@@ -175,3 +186,5 @@ The default sync backend is Blockstream's public Esplora API at `https://blockst
 Existing `wallets.json` files in the project root are not moved automatically. Move the file to the user data directory, or use `--datadir` with the old directory explicitly.
 
 Passwords passed on the command line may be recorded in shell history. These wallet commands are intended for study and experimentation, not production custody.
+
+`ecdsa-sign` signs `sha256(message_utf8)` with deterministic ECDSA/RFC6979 and outputs canonical DER signature hex. This is a raw cryptographic signature helper, not Bitcoin Core's legacy `signmessage` envelope format.

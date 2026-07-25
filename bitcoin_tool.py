@@ -34,6 +34,7 @@ from btc.btc_address_gen import (
 )
 from version import __version__
 from network import EsploraBackend, EsploraError
+from sign import MessageSignatureError, ecdsa_sign_message, ecdsa_verify_message
 from wallet import (
     WalletError,
     create_wallet,
@@ -153,6 +154,29 @@ def cmd_addr(args):
     print("P2WPKH (bc1q)                :", p2wpkh_bech32_address(pub_c))
     print("P2SH-P2WPKH (3...)           :", p2sh_p2wpkh_address(pub_c))
     print("P2TR (bc1p)                  :", p2tr_address(pub_c))
+
+
+def cmd_ecdsa_sign(args):
+    try:
+        result = ecdsa_sign_message(args.private_key_hex, args.message)
+    except MessageSignatureError as exc:
+        args.parser.error(str(exc))
+
+    print("message                  :", result["message"])
+    print("message hash (sha256)    :", result["message_hash"])
+    print("signature format         :", result["signature_format"])
+    print("signature hex            :", result["signature"])
+    print("compressed public key    :", result["public_key_compressed"])
+    print("uncompressed public key  :", result["public_key_uncompressed"])
+
+
+def cmd_ecdsa_verify(args):
+    try:
+        valid = ecdsa_verify_message(args.public_key_hex, args.message, args.sign)
+    except MessageSignatureError as exc:
+        args.parser.error(str(exc))
+
+    print("verification:", "success" if valid else "failed")
 
 
 def cmd_createwallet(args):
@@ -651,6 +675,11 @@ class BitcoinToolShell(cmd.Cmd):
     )
     prompt = "bitcoin-tool> "
 
+    def __getattr__(self, name: str):
+        if name.startswith(("do_", "complete_")) and "-" in name:
+            return object.__getattribute__(self, name.replace("-", "_"))
+        raise AttributeError(name)
+
     def emptyline(self) -> None:
         # cmd.Cmd normally repeats the previous command on an empty line.
         # For a wallet tool, doing nothing is safer.
@@ -698,6 +727,20 @@ class BitcoinToolShell(cmd.Cmd):
 
     def complete_addr(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return self._complete_options("addr", text)
+
+    def do_ecdsa_sign(self, argument_line: str) -> None:
+        """Sign a message with raw ECDSA over secp256k1."""
+        self._run_command("ecdsa-sign", argument_line)
+
+    def complete_ecdsa_sign(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("ecdsa-sign", text)
+
+    def do_ecdsa_verify(self, argument_line: str) -> None:
+        """Verify a raw ECDSA message signature."""
+        self._run_command("ecdsa-verify", argument_line)
+
+    def complete_ecdsa_verify(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("ecdsa-verify", text)
 
     def do_createwallet(self, argument_line: str) -> None:
         """Create a BIP84 wallet."""
@@ -860,6 +903,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     #p_addr.add_argument("--testnet", action="store_true", help="use testnet version")#to be implemented in future
     p_addr.set_defaults(func=cmd_addr, parser=p_addr)
+
+    # ecdsa-sign
+    p_ecdsa_sign = sub.add_parser(
+        "ecdsa-sign",
+        help="sign a message with raw ECDSA over secp256k1",
+    )
+    p_ecdsa_sign.add_argument(
+        "--private-key-hex",
+        required=True,
+        help="32-byte private key hex (64 hex chars)",
+    )
+    p_ecdsa_sign.add_argument("--message", required=True, help="message text")
+    p_ecdsa_sign.set_defaults(func=cmd_ecdsa_sign, parser=p_ecdsa_sign)
+
+    # ecdsa-verify
+    p_ecdsa_verify = sub.add_parser(
+        "ecdsa-verify",
+        help="verify a raw ECDSA message signature",
+    )
+    p_ecdsa_verify.add_argument(
+        "--public-key-hex",
+        required=True,
+        help="compressed (33-byte) or uncompressed (65-byte) public key hex",
+    )
+    p_ecdsa_verify.add_argument("--message", required=True, help="message text")
+    p_ecdsa_verify.add_argument("--sign", required=True, help="DER signature hex")
+    p_ecdsa_verify.set_defaults(func=cmd_ecdsa_verify, parser=p_ecdsa_verify)
 
     # createwallet
     p_createwallet = sub.add_parser("createwallet", help="create a BIP84 wallet")

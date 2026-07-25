@@ -1,5 +1,5 @@
 """
-Copyright 2026 娓╀腑蹇?(Wen Zhongzhi)
+Copyright 2026 温中志 (Wen Zhongzhi)
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
