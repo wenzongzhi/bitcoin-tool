@@ -91,6 +91,8 @@ def _normalize_utxo(utxo: dict, address_entry: dict, tip_height: int | None) -> 
         "branch": address_entry["branch"],
         "index": address_entry["index"],
         "script_pubkey": address_entry["script_pubkey"],
+        "account_id": address_entry["account_id"],
+        "address_type": address_entry["address_type"],
     }
 
 
@@ -147,6 +149,7 @@ def _summarize_transaction(tx: dict, address_map: dict[str, dict], tip_height: i
     involved_addresses = sorted(_transaction_addresses(tx, address_map))
     if not involved_addresses:
         return None
+    involved_entries = [address_map[address] for address in involved_addresses]
     net = received - sent
     if sent and received:
         direction = "self" if net == 0 else ("receive" if net > 0 else "send")
@@ -172,6 +175,10 @@ def _summarize_transaction(tx: dict, address_map: dict[str, dict], tip_height: i
         "confirmed": bool(status.get("confirmed")),
         "confirmations": _confirmations(status, tip_height),
         "addresses": involved_addresses,
+        "account_ids": sorted({entry["account_id"] for entry in involved_entries}),
+        "address_types": sorted(
+            {entry["address_type"] for entry in involved_entries}
+        ),
     }
 
 
@@ -236,6 +243,8 @@ def sync_wallet(
         address_caches.append(
             {
                 "address": address,
+                "account_id": entry["account_id"],
+                "address_type": entry["address_type"],
                 "path": entry["path"],
                 "branch": entry["branch"],
                 "index": entry["index"],

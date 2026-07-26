@@ -27,7 +27,7 @@ from .wallet import WalletError, default_data_dir
 
 
 WALLET_CACHE_FILENAME = "wallet_cache.json"
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 def utc_now() -> str:
@@ -60,10 +60,9 @@ def load_wallet_cache(cache_file: Path) -> dict:
     except (OSError, json.JSONDecodeError) as exc:
         raise WalletError(f'cannot read wallet cache file "{cache_file}": {exc}') from exc
 
-    if not isinstance(cache, dict):
+    if not isinstance(cache, dict) or cache.get("version") != CACHE_VERSION:
         raise WalletError(f'invalid wallet cache file "{cache_file}"')
-    cache.setdefault("version", CACHE_VERSION)
-    wallets = cache.setdefault("wallets", {})
+    wallets = cache.get("wallets")
     if not isinstance(wallets, dict):
         raise WalletError(f'invalid wallet cache file "{cache_file}"')
     return cache
