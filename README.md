@@ -9,7 +9,7 @@ You can use this tool to complete the following task
 - Generate a P2PKH address from an uncompressed public key
 - Sign and verify messages with raw secp256k1 ECDSA signatures
 - Sign and verify P2PKH messages in Bitcoin Core format and P2WPKH messages in BIP322 simple format
-- Create encrypted or plaintext BIP39/BIP84 wallets and derive P2WPKH addresses from an account xpub
+- Create encrypted or plaintext BIP39 wallets with BIP44, BIP49, BIP84, and BIP86 accounts
 - Sync issued wallet addresses through an Esplora API and cache balance, UTXOs, and transactions
 - Start an interactive `bitcoin-tool shell` with command completion
 
@@ -118,9 +118,17 @@ Plaintext wallets do not require `--password` when displaying the mnemonic:
 $ python bitcoin_tool.py getmnemonic --wallet-name "unsafe_test_wallet"
 ```
 
-- derive successive P2WPKH receiving addresses
+- derive the next receiving address (P2WPKH by default)
 ```bash
 $ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01"
+```
+
+- derive receiving addresses from a specific account
+```bash
+$ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01" --address-type p2pkh
+$ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01" --address-type p2sh-p2wpkh
+$ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01" --address-type p2wpkh
+$ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01" --address-type p2tr
 ```
 
 - sign with an issued wallet address path
@@ -128,16 +136,17 @@ $ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01"
 $ python bitcoin_tool.py bitcoin-sign-message --wallet-name "my_BTC_01" --path "m/84'/0'/0'/0/0" --password "test-password" --message "hello"
 ```
 
-The path must already exist in the wallet's `issued_addresses`. Omit `--password` for a plaintext wallet.
+The path must already exist in one account's `issued_addresses`. Wallet message signing currently accepts issued P2PKH and P2WPKH paths. Omit `--password` for a plaintext wallet.
 
-- derive a P2WPKH change address
+- derive a change address from a specific account
 ```bash
-$ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01" --change
+$ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01" --address-type p2wpkh --change
 ```
 
-- export the BIP84 account xpub
+- export an account xpub (P2WPKH by default)
 ```bash
 $ python bitcoin_tool.py exportxpub --wallet-name "my_BTC_01" --password "test-password"
+$ python bitcoin_tool.py exportxpub --wallet-name "my_BTC_01" --address-type p2pkh --password "test-password"
 ```
 
 - derive a P2WPKH address from an external account xpub
@@ -198,11 +207,20 @@ Wallet data is stored outside the source tree by default:
 - Linux: `~/.local/share/bitcoin-tool/wallets.json`
 - macOS: `~/Library/Application Support/bitcoin-tool/wallets.json`
 
-Use `--datadir PATH` on a wallet command, or set `BITCOIN_TOOL_DATADIR`, to override this location. Each issued address is recorded as public metadata in `issued_addresses`; private keys are never stored separately.
+Use `--datadir PATH` on a wallet command, or set `BITCOIN_TOOL_DATADIR`, to override this location. Private keys are never stored separately.
 
-Wallets store the BIP84 account xpub (`m/84'/0'/0'`) so `getnewaddress` and `rebuildaddressbook` do not need to decrypt the mnemonic. The account xpub cannot spend coins, but it can reveal every receiving and change address in that account. Keep it private unless you intentionally need a watch-only setup.
+Wallet format version 3 stores four independent account objects under `accounts`:
 
-`syncwallet` reads issued addresses from `wallets.json`, queries an Esplora-compatible backend, and writes public chain state into `wallet_cache.json` in the same data directory. `getbalance`, `listunspent`, and `listtransactions` read only this cache and do not perform network requests.
+- `bip44-account-0`: P2PKH, `m/44'/0'/0'`
+- `bip49-account-0`: P2SH-P2WPKH, `m/49'/0'/0'`
+- `bip84-account-0`: P2WPKH, `m/84'/0'/0'`
+- `bip86-account-0`: P2TR, `m/86'/0'/0'`
+
+Each account owns its account xpub, receiving/change indexes, and `issued_addresses`. The account xpub cannot spend coins, but it reveals every receiving and change address in that account. Keep it private unless you intentionally need a watch-only setup.
+
+Wallet format versions 1 and 2 are rejected. There is no automatic migration: recreate the wallet from its mnemonic to obtain the version 3 structure. Wallet cache version 1 is also rejected; remove the old `wallet_cache.json` and run `syncwallet` to create a fresh cache.
+
+`syncwallet` reads issued addresses from every account in `wallets.json`, queries an Esplora-compatible backend, and writes public chain state into `wallet_cache.json` in the same data directory. Cached addresses and UTXOs retain their `account_id` and `address_type`. `getbalance`, `listunspent`, and `listtransactions` read only this cache and do not perform network requests.
 
 Only addresses already created by `getnewaddress` are synced. If you used addresses outside this tool's issued address book, create or rebuild the address records first.
 

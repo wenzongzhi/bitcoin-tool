@@ -43,6 +43,8 @@ from sign import (
     verify_p2wpkh_message,
 )
 from wallet import (
+    DEFAULT_ADDRESS_TYPE,
+    SUPPORTED_ADDRESS_TYPES,
     WalletError,
     create_wallet,
     default_wallet_cache_file,
@@ -212,6 +214,11 @@ def cmd_bitcoin_sign_message(args):
             )
         except WalletError as exc:
             args.parser.error(str(exc))
+        if wallet_key["address_type"] not in ("P2PKH", "P2WPKH"):
+            args.parser.error(
+                "wallet message signing currently supports only issued "
+                "P2PKH and P2WPKH paths"
+            )
         private_key_hex = wallet_key["private_key_hex"]
         source = "wallet"
 
@@ -224,6 +231,8 @@ def cmd_bitcoin_sign_message(args):
     if wallet_key is not None:
         print("wallet name                  :", wallet_key["wallet_name"])
         print("derivation path              :", wallet_key["derivation_path"])
+        print("selected wallet address      :", wallet_key["address"])
+        print("selected wallet address type :", wallet_key["address_type"])
     print("message                      :", result["message"])
     print("compressed public key        :", result["public_key_compressed"])
     print("legacy address               :", result["legacy"]["address"])
@@ -273,6 +282,7 @@ def cmd_createwallet(args):
     if result["mnemonic"] is not None:
         print("mnemonic    :", result["mnemonic"])
     print("encrypted   :", "yes" if result["encrypted"] else "no")
+    print("accounts    :", result["account_count"])
     print("wallet file :", result["wallet_file"])
 
 
@@ -296,11 +306,13 @@ def cmd_getnewaddress(args):
             wallet_name=args.wallet_name,
             wallet_file=default_wallet_file(args.datadir),
             change=args.change,
+            address_type=args.address_type,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
 
     print("wallet name     :", result["wallet_name"])
+    print("account id      :", result["account_id"])
     print("address         :", result["address"])
     print("address type    :", result["address_type"])
     print("address purpose :", result["purpose"])
@@ -329,11 +341,13 @@ def cmd_rebuildaddressbook(args):
         result = rebuild_address_book(
             wallet_name=args.wallet_name,
             wallet_file=default_wallet_file(args.datadir),
+            address_type=args.address_type,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
 
     print("wallet name       :", result["wallet_name"])
+    print("account count     :", result["account_count"])
     print("address count     :", result["address_count"])
     print("recovered entries :", result["recovered_count"])
     print("wallet file       :", result["wallet_file"])
@@ -345,11 +359,14 @@ def cmd_exportxpub(args):
             wallet_name=args.wallet_name,
             password=args.password,
             wallet_file=default_wallet_file(args.datadir),
+            address_type=args.address_type,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
 
     print("wallet name     :", result["wallet_name"])
+    print("account id      :", result["account_id"])
+    print("standard        :", result["standard"])
     print("address type    :", result["address_type"])
     print("account path    :", result["account_derivation_path"])
     print("account xpub    :", result["account_xpub"])
@@ -454,6 +471,8 @@ def cmd_listunspent(args):
         print("confirmed    :", "yes" if utxo.get("confirmed") else "no")
         print("confirmations:", utxo.get("confirmations", 0))
         print("address      :", utxo["address"])
+        print("account id   :", utxo["account_id"])
+        print("address type :", utxo["address_type"])
         print("path         :", utxo["path"])
         print("scriptPubKey :", utxo["script_pubkey"])
 
@@ -485,6 +504,8 @@ def cmd_listtransactions(args):
         print("fee          :", tx["fee"], "sats", f"({_format_btc(tx['fee'])})")
         print("confirmed    :", "yes" if tx.get("confirmed") else "no")
         print("confirmations:", tx.get("confirmations", 0))
+        print("account ids  :", ", ".join(tx.get("account_ids", [])))
+        print("address types:", ", ".join(tx.get("address_types", [])))
         print("addresses    :", ", ".join(tx.get("addresses", [])))
 
 
@@ -829,7 +850,7 @@ class BitcoinToolShell(cmd.Cmd):
         return self._complete_options("bitcoin-verify-message", text)
 
     def do_createwallet(self, argument_line: str) -> None:
-        """Create a BIP84 wallet."""
+        """Create a multi-account HD wallet."""
         self._run_command("createwallet", argument_line)
 
     def complete_createwallet(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
@@ -1033,7 +1054,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bitcoin_sign.add_argument(
         "--path",
-        help="issued BIP84 path, for example m/84'/0'/0'/0/0",
+        help="issued wallet path, for example m/84'/0'/0'/0/0",
     )
     p_bitcoin_sign.add_argument(
         "--password",
@@ -1072,7 +1093,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # createwallet
-    p_createwallet = sub.add_parser("createwallet", help="create a BIP84 wallet")
+    p_createwallet = sub.add_parser(
+        "createwallet",
+        help="create a multi-account BIP44/49/84/86 wallet",
+    )
     p_createwallet.add_argument(
         "--wallet-name",
         required=True,
@@ -1100,13 +1124,19 @@ def build_parser() -> argparse.ArgumentParser:
     # getnewaddress
     p_getnewaddress = sub.add_parser(
         "getnewaddress",
-        help="derive the next P2WPKH receiving address",
+        help="derive the next receiving or change address",
     )
     add_wallet_access_arguments(p_getnewaddress)
     p_getnewaddress.add_argument(
+        "--address-type",
+        default=DEFAULT_ADDRESS_TYPE,
+        choices=SUPPORTED_ADDRESS_TYPES,
+        help="wallet account/address type (default: p2wpkh)",
+    )
+    p_getnewaddress.add_argument(
         "--change",
         action="store_true",
-        help="derive the next P2WPKH change address instead of a receiving address",
+        help="derive the next change address instead of a receiving address",
     )
     p_getnewaddress.set_defaults(func=cmd_getnewaddress, parser=p_getnewaddress)
 
@@ -1132,6 +1162,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="rebuild issued address metadata from wallet public derivation state",
     )
     add_wallet_access_arguments(p_rebuildaddressbook)
+    p_rebuildaddressbook.add_argument(
+        "--address-type",
+        choices=SUPPORTED_ADDRESS_TYPES,
+        help="rebuild only this account; default rebuilds every account",
+    )
     p_rebuildaddressbook.set_defaults(
         func=cmd_rebuildaddressbook,
         parser=p_rebuildaddressbook,
@@ -1140,7 +1175,7 @@ def build_parser() -> argparse.ArgumentParser:
     # exportxpub
     p_exportxpub = sub.add_parser(
         "exportxpub",
-        help="export the BIP84 account xpub for a wallet",
+        help="export an account xpub for a wallet",
     )
     p_exportxpub.add_argument("--wallet-name", required=True, help="wallet name")
     p_exportxpub.add_argument(
@@ -1150,6 +1185,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_exportxpub.add_argument(
         "--datadir",
         help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",
+    )
+    p_exportxpub.add_argument(
+        "--address-type",
+        default=DEFAULT_ADDRESS_TYPE,
+        choices=SUPPORTED_ADDRESS_TYPES,
+        help="wallet account/address type (default: p2wpkh)",
     )
     p_exportxpub.set_defaults(func=cmd_exportxpub, parser=p_exportxpub)
 

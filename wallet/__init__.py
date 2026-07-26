@@ -1,4 +1,7 @@
 from .wallet import (
+    DEFAULT_ADDRESS_TYPE,
+    SUPPORTED_ADDRESS_TYPES,
+    WALLET_VERSION,
     WalletError,
     create_wallet,
     default_wallet_file,
@@ -24,6 +27,9 @@ from .wallet_sync import (
 )
 
 __all__ = [
+    "DEFAULT_ADDRESS_TYPE",
+    "SUPPORTED_ADDRESS_TYPES",
+    "WALLET_VERSION",
     "WalletError",
     "create_wallet",
     "default_wallet_cache_file",

@@ -127,7 +127,16 @@ def p2wpkh_script_pubkey(pubkey_compressed: bytes) -> str:
     return (b"\x00\x14" + hash160(pubkey_compressed)).hex()
 
 
-def p2tr_address(pubkey_compressed: bytes) -> str:
+def p2pkh_script_pubkey(pubkey: bytes) -> str:
+    return (b"\x76\xa9\x14" + hash160(pubkey) + b"\x88\xac").hex()
+
+
+def p2sh_p2wpkh_script_pubkey(pubkey_compressed: bytes) -> str:
+    redeem_script = b"\x00\x14" + hash160(pubkey_compressed)
+    return (b"\xa9\x14" + hash160(redeem_script) + b"\x87").hex()
+
+
+def p2tr_output_key(pubkey_compressed: bytes) -> bytes:
     if len(pubkey_compressed) != 33 or not is_valid_public_key(pubkey_compressed):
         raise ValueError("P2TR requires a compressed secp256k1 public key")
 
@@ -147,9 +156,17 @@ def p2tr_address(pubkey_compressed: bytes) -> str:
     output_point = internal_point + tweak * SECP256k1.generator
     if output_point == INFINITY:
         raise ValueError("invalid Taproot output point")
-    output_key = output_point.x().to_bytes(32, "big")
+    return output_point.x().to_bytes(32, "big")
+
+
+def p2tr_address(pubkey_compressed: bytes) -> str:
+    output_key = p2tr_output_key(pubkey_compressed)
     data = [1] + list(convertbits(output_key, 8, 5, True))
     return bech32m_encode("bc", data)
+
+
+def p2tr_script_pubkey(pubkey_compressed: bytes) -> str:
+    return (b"\x51\x20" + p2tr_output_key(pubkey_compressed)).hex()
 
 
 def p2sh_p2wpkh_address(pubkey_compressed: bytes) -> str:
