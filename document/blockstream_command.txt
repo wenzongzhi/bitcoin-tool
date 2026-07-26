@@ -1,0 +1,12 @@
+get current bitcoin blockchain hight
+https://blockstream.info/api/blocks/tip/height
+
+get current bitcoin blockchain header hash
+https://blockstream.info/api/blocks/tip/hash
+
+https://blockstream.info/api/address/bc1qdge7wrnj65nlx69x0z0envw94zjvn0v9z72xdx
+
+https://blockstream.info/api/address/bc1qdge7wrnj65nlx69x0z0envw94zjvn0v9z72xdx/utxo
+
+https://blockstream.info/api/address/bc1qdge7wrnj65nlx69x0z0envw94zjvn0v9z72xdx/txs
+

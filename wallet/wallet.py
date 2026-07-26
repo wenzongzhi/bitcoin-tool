@@ -32,7 +32,11 @@ from mnemonic import Mnemonic
 from filelock import FileLock, Timeout
 from platformdirs import user_data_path
 
-from btc.btc_address_gen import p2wpkh_bech32_address, p2wpkh_script_pubkey
+from btc.btc_address_gen import (
+    p2wpkh_bech32_address,
+    p2wpkh_script_pubkey,
+    privkey_to_pubkey,
+)
 
 
 WALLET_FILENAME = "wallets.json"
@@ -304,6 +308,82 @@ def get_mnemonic(
     return {
         "wallet_name": wallet_name,
         "mnemonic": mnemonic,
+    }
+
+
+def get_wallet_signing_key(
+    wallet_name: str,
+    derivation_path: str,
+    password: str | None = None,
+    wallet_file: Path | None = None,
+) -> dict:
+    _validate_wallet_name(wallet_name)
+    path_match = re.fullmatch(r"m/84'/0'/0'/([01])/([0-9]+)", derivation_path)
+    if path_match is None:
+        raise WalletError(
+            "path must identify an issued BIP84 address, for example "
+            "m/84'/0'/0'/0/0"
+        )
+    branch = int(path_match.group(1))
+    index = int(path_match.group(2))
+    if index >= 2**31:
+        raise WalletError("wallet address index must be in range 0..2147483647")
+
+    path = wallet_file or default_wallet_file()
+    with _locked_wallet_file(path):
+        wallets = _load_wallets(path)
+        wallet = wallets.get(wallet_name)
+        if not isinstance(wallet, dict):
+            raise WalletError(f'wallet "{wallet_name}" does not exist in "{path}"')
+
+        account_xpub, account_path, _ = _read_public_derivation_state(wallet, branch)
+        if not derivation_path.startswith(f"{account_path}/"):
+            raise WalletError("wallet derivation path is outside the BIP84 account")
+
+        issued_addresses = wallet.get("issued_addresses")
+        if not isinstance(issued_addresses, list):
+            raise WalletError("wallet address book is invalid")
+        matches = [
+            entry
+            for entry in issued_addresses
+            if isinstance(entry, dict) and entry.get("path") == derivation_path
+        ]
+        if len(matches) != 1:
+            raise WalletError("path is not a unique issued wallet address")
+        entry = matches[0]
+        if (
+            entry.get("branch") != branch
+            or entry.get("index") != index
+            or entry.get("type") != ADDRESS_TYPE_P2WPKH
+            or not isinstance(entry.get("address"), str)
+        ):
+            raise WalletError("wallet address book entry is invalid")
+
+        mnemonic = _read_mnemonic(wallet_name, wallet, password)
+        _validate_mnemonic(mnemonic)
+        try:
+            private_key = BIP32.from_seed(
+                Mnemonic.to_seed(mnemonic, passphrase="")
+            ).get_privkey_from_path(derivation_path)
+        except Exception as exc:
+            raise WalletError("cannot derive private key for wallet path") from exc
+
+        public_key = privkey_to_pubkey(private_key, compressed=True)
+        xpub_public_key = derive_p2wpkh_public_key_from_account_xpub(
+            account_xpub,
+            branch,
+            index,
+        )
+        address = p2wpkh_bech32_address(public_key)
+        if public_key != xpub_public_key or address != entry["address"]:
+            raise WalletError("wallet private and public derivation data do not match")
+
+    return {
+        "wallet_name": wallet_name,
+        "derivation_path": derivation_path,
+        "address": address,
+        "private_key_hex": private_key.hex(),
+        "public_key_hex": public_key.hex(),
     }
 
 

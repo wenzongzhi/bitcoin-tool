@@ -1,6 +1,7 @@
 bech32
 bip32
 cryptography
+coincurve
 ecdsa
 filelock
 mnemonic

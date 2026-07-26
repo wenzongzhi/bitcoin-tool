@@ -8,6 +8,7 @@ You can use this tool to complete the following task
 - Generate P2PKH, P2WPKH, P2SH-P2WPKH, and P2TR addresses from a compressed public key
 - Generate a P2PKH address from an uncompressed public key
 - Sign and verify messages with raw secp256k1 ECDSA signatures
+- Sign and verify P2PKH messages in Bitcoin Core format and P2WPKH messages in BIP322 simple format
 - Create encrypted or plaintext BIP39/BIP84 wallets and derive P2WPKH addresses from an account xpub
 - Sync issued wallet addresses through an Esplora API and cache balance, UTXOs, and transactions
 - Start an interactive `bitcoin-tool shell` with command completion
@@ -64,6 +65,23 @@ $ python bitcoin_tool.py ecdsa-sign --private-key-hex "0000000000000000000000000
 $ python bitcoin_tool.py ecdsa-verify --public-key-hex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" --message "hello" --sign "304402200f2fff8620d8ffe97040f8cf72ae476ef8ff4412373929c0324ce8428d3352e702201845ae4903027667005846f8f0be3e5ed2db5c3826ba83a6e542e080792f9a9d"
 ```
 
+- sign a message for both the compressed-key P2PKH and P2WPKH addresses
+```bash
+$ python bitcoin_tool.py bitcoin-sign-message --private-key-hex "0000000000000000000000000000000000000000000000000000000000000001" --message "hello"
+```
+
+The command prints a Bitcoin Core compact Base64 signature for the `1...` address and a BIP322 simple Base64 signature for the `bc1q...` address. It also prints each protocol's internal DER ECDSA signature for inspection.
+
+- verify a Bitcoin Core-compatible legacy P2PKH signature
+```bash
+$ python bitcoin_tool.py bitcoin-verify-message --legacy-addr "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH" --message "hello" --sign "Base64-signature"
+```
+
+- verify a BIP322 simple P2WPKH signature
+```bash
+$ python bitcoin_tool.py bitcoin-verify-message --p2wpkh-addr "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4" --message "hello" --sign "smpBase64-signature"
+```
+
 - create an AES-encrypted wallet with optional 256-bit entropy
 ```bash
 $ python bitcoin_tool.py createwallet --wallet-name "my_BTC_01" --password "test-password"
@@ -104,6 +122,13 @@ $ python bitcoin_tool.py getmnemonic --wallet-name "unsafe_test_wallet"
 ```bash
 $ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01"
 ```
+
+- sign with an issued wallet address path
+```bash
+$ python bitcoin_tool.py bitcoin-sign-message --wallet-name "my_BTC_01" --path "m/84'/0'/0'/0/0" --password "test-password" --message "hello"
+```
+
+The path must already exist in the wallet's `issued_addresses`. Omit `--password` for a plaintext wallet.
 
 - derive a P2WPKH change address
 ```bash
@@ -185,6 +210,10 @@ The default sync backend is Blockstream's public Esplora API at `https://blockst
 
 Existing `wallets.json` files in the project root are not moved automatically. Move the file to the user data directory, or use `--datadir` with the old directory explicitly.
 
-Passwords passed on the command line may be recorded in shell history. These wallet commands are intended for study and experimentation, not production custody.
+Passwords and private keys passed on the command line may be recorded in shell history or visible in process listings. These wallet commands are intended for study and experimentation, not production custody.
 
 `ecdsa-sign` signs `sha256(message_utf8)` with deterministic ECDSA/RFC6979 and outputs canonical DER signature hex. This is a raw cryptographic signature helper, not Bitcoin Core's legacy `signmessage` envelope format.
+
+`bitcoin-sign-message` produces two separate address-proof formats. Legacy P2PKH uses the compact recoverable Base64 format accepted by Bitcoin Core `verifymessage`. Native SegWit P2WPKH uses BIP322 simple and includes the current `smp` prefix; `bitcoin-verify-message` also accepts the older unprefixed BIP322 encoding for compatibility. The displayed DER value is only the ECDSA component inside its protocol and is not, by itself, a complete address-verifiable message signature.
+
+A P2PKH address and a P2WPKH address are not converted into one another. This tool derives both locking scripts from the same compressed public key, so one private key controls both resulting addresses. Third-party and hardware-wallet support varies; use the Base64 value for the matching protocol and address type.

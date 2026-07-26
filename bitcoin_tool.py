@@ -34,7 +34,14 @@ from btc.btc_address_gen import (
 )
 from version import __version__
 from network import EsploraBackend, EsploraError
-from sign import MessageSignatureError, ecdsa_sign_message, ecdsa_verify_message
+from sign import (
+    MessageSignatureError,
+    bitcoin_sign_message,
+    ecdsa_sign_message,
+    ecdsa_verify_message,
+    verify_legacy_message,
+    verify_p2wpkh_message,
+)
 from wallet import (
     WalletError,
     create_wallet,
@@ -46,6 +53,7 @@ from wallet import (
     get_cached_balance,
     get_mnemonic,
     get_new_address,
+    get_wallet_signing_key,
     list_cached_transactions,
     list_cached_unspent,
     mnemonic_from_entropy_hex,
@@ -177,6 +185,70 @@ def cmd_ecdsa_verify(args):
         args.parser.error(str(exc))
 
     print("verification:", "success" if valid else "failed")
+
+
+def cmd_bitcoin_sign_message(args):
+    if args.private_key_hex is not None:
+        if args.path is not None or args.password is not None or args.datadir is not None:
+            args.parser.error(
+                "--path, --password, and --datadir apply only to --wallet-name"
+            )
+        private_key_hex = args.private_key_hex
+        source = "private key argument"
+        wallet_key = None
+        print(
+            "WARNING: --private-key-hex may be visible in shell history and process listings.",
+            file=sys.stderr,
+        )
+    else:
+        if args.path is None:
+            args.parser.error("--path is required with --wallet-name")
+        try:
+            wallet_key = get_wallet_signing_key(
+                wallet_name=args.wallet_name,
+                derivation_path=args.path,
+                password=args.password,
+                wallet_file=default_wallet_file(args.datadir),
+            )
+        except WalletError as exc:
+            args.parser.error(str(exc))
+        private_key_hex = wallet_key["private_key_hex"]
+        source = "wallet"
+
+    try:
+        result = bitcoin_sign_message(private_key_hex, args.message)
+    except MessageSignatureError as exc:
+        args.parser.error(str(exc))
+
+    print("source                       :", source)
+    if wallet_key is not None:
+        print("wallet name                  :", wallet_key["wallet_name"])
+        print("derivation path              :", wallet_key["derivation_path"])
+    print("message                      :", result["message"])
+    print("compressed public key        :", result["public_key_compressed"])
+    print("legacy address               :", result["legacy"]["address"])
+    print("legacy format                :", "Bitcoin Core compact")
+    print("legacy signature DER         :", result["legacy"]["signature_der"])
+    print("legacy signature Base64      :", result["legacy"]["signature_base64"])
+    print("P2WPKH address               :", result["p2wpkh"]["address"])
+    print("P2WPKH format                :", "BIP322 simple")
+    print("P2WPKH signature DER         :", result["p2wpkh"]["signature_der"])
+    print("P2WPKH signature Base64      :", result["p2wpkh"]["signature_base64"])
+
+
+def cmd_bitcoin_verify_message(args):
+    if args.legacy_addr is not None:
+        address = args.legacy_addr
+        signature_format = "Bitcoin Core compact"
+        valid = verify_legacy_message(address, args.message, args.sign)
+    else:
+        address = args.p2wpkh_addr
+        signature_format = "BIP322 simple"
+        valid = verify_p2wpkh_message(address, args.message, args.sign)
+
+    print("address      :", address)
+    print("format       :", signature_format)
+    print("verification :", "success" if valid else "failed")
 
 
 def cmd_createwallet(args):
@@ -742,6 +814,20 @@ class BitcoinToolShell(cmd.Cmd):
     def complete_ecdsa_verify(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return self._complete_options("ecdsa-verify", text)
 
+    def do_bitcoin_sign_message(self, argument_line: str) -> None:
+        """Sign a message for P2PKH and P2WPKH addresses."""
+        self._run_command("bitcoin-sign-message", argument_line)
+
+    def complete_bitcoin_sign_message(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("bitcoin-sign-message", text)
+
+    def do_bitcoin_verify_message(self, argument_line: str) -> None:
+        """Verify a Bitcoin address message signature."""
+        self._run_command("bitcoin-verify-message", argument_line)
+
+    def complete_bitcoin_verify_message(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("bitcoin-verify-message", text)
+
     def do_createwallet(self, argument_line: str) -> None:
         """Create a BIP84 wallet."""
         self._run_command("createwallet", argument_line)
@@ -930,6 +1016,60 @@ def build_parser() -> argparse.ArgumentParser:
     p_ecdsa_verify.add_argument("--message", required=True, help="message text")
     p_ecdsa_verify.add_argument("--sign", required=True, help="DER signature hex")
     p_ecdsa_verify.set_defaults(func=cmd_ecdsa_verify, parser=p_ecdsa_verify)
+
+    # bitcoin-sign-message
+    p_bitcoin_sign = sub.add_parser(
+        "bitcoin-sign-message",
+        help="sign for a legacy P2PKH address and a P2WPKH address",
+    )
+    bitcoin_sign_source = p_bitcoin_sign.add_mutually_exclusive_group(required=True)
+    bitcoin_sign_source.add_argument(
+        "--private-key-hex",
+        help="32-byte private key hex; exposed to shell history/process listings",
+    )
+    bitcoin_sign_source.add_argument(
+        "--wallet-name",
+        help="wallet containing the issued address path",
+    )
+    p_bitcoin_sign.add_argument(
+        "--path",
+        help="issued BIP84 path, for example m/84'/0'/0'/0/0",
+    )
+    p_bitcoin_sign.add_argument(
+        "--password",
+        help="password for an encrypted wallet",
+    )
+    p_bitcoin_sign.add_argument(
+        "--datadir",
+        help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",
+    )
+    p_bitcoin_sign.add_argument("--message", required=True, help="message text")
+    p_bitcoin_sign.set_defaults(func=cmd_bitcoin_sign_message, parser=p_bitcoin_sign)
+
+    # bitcoin-verify-message
+    p_bitcoin_verify = sub.add_parser(
+        "bitcoin-verify-message",
+        help="verify a Bitcoin Core legacy or BIP322 P2WPKH message signature",
+    )
+    bitcoin_verify_address = p_bitcoin_verify.add_mutually_exclusive_group(required=True)
+    bitcoin_verify_address.add_argument(
+        "--legacy-addr",
+        help="mainnet P2PKH address (1...)",
+    )
+    bitcoin_verify_address.add_argument(
+        "--p2wpkh-addr",
+        help="mainnet native SegWit P2WPKH address (bc1q...)",
+    )
+    p_bitcoin_verify.add_argument(
+        "--sign",
+        required=True,
+        help="Bitcoin Core compact or BIP322 simple Base64 signature",
+    )
+    p_bitcoin_verify.add_argument("--message", required=True, help="message text")
+    p_bitcoin_verify.set_defaults(
+        func=cmd_bitcoin_verify_message,
+        parser=p_bitcoin_verify,
+    )
 
     # createwallet
     p_createwallet = sub.add_parser("createwallet", help="create a BIP84 wallet")
