@@ -17,6 +17,7 @@ limitations under the License.
 from pathlib import Path
 
 from network.esplora_backend import EsploraBackend
+from btc.chainparams import NETWORK_MAINNET
 
 from .wallet import (
     WalletError,
@@ -206,10 +207,21 @@ def sync_wallet(
     cache_file: Path | None = None,
     backend: EsploraBackend | None = None,
     include_transactions: bool = True,
+    network: str = NETWORK_MAINNET,
 ) -> dict:
-    backend = backend or EsploraBackend()
-    cache_path = cache_file or default_wallet_cache_file()
-    address_book = get_wallet_address_book(wallet_name, wallet_file)
+    backend = backend or EsploraBackend(network=network)
+    if getattr(backend, "network", None) != network:
+        raise WalletError(
+            f'wallet network is "{network}", but backend network is '
+            f'"{getattr(backend, "network", None)}"'
+        )
+    backend.verify_network()
+    cache_path = cache_file or default_wallet_cache_file(network=network)
+    address_book = get_wallet_address_book(
+        wallet_name,
+        wallet_file,
+        network=network,
+    )
     address_entries = address_book["addresses"]
     address_map = {entry["address"]: entry for entry in address_entries}
 
@@ -261,6 +273,7 @@ def sync_wallet(
         wallet_name,
         used_addresses,
         wallet_file,
+        network,
     )
     transactions = [
         summary
@@ -311,8 +324,12 @@ def sync_wallet(
     }
 
 
-def get_cached_balance(wallet_name: str, cache_file: Path | None = None) -> dict:
-    cache_path = cache_file or default_wallet_cache_file()
+def get_cached_balance(
+    wallet_name: str,
+    cache_file: Path | None = None,
+    network: str = NETWORK_MAINNET,
+) -> dict:
+    cache_path = cache_file or default_wallet_cache_file(network=network)
     wallet_cache = read_wallet_cache_entry(wallet_name, cache_path)
     balance = wallet_cache.get("balance")
     if not isinstance(balance, dict):
@@ -326,8 +343,12 @@ def get_cached_balance(wallet_name: str, cache_file: Path | None = None) -> dict
     }
 
 
-def list_cached_unspent(wallet_name: str, cache_file: Path | None = None) -> dict:
-    cache_path = cache_file or default_wallet_cache_file()
+def list_cached_unspent(
+    wallet_name: str,
+    cache_file: Path | None = None,
+    network: str = NETWORK_MAINNET,
+) -> dict:
+    cache_path = cache_file or default_wallet_cache_file(network=network)
     wallet_cache = read_wallet_cache_entry(wallet_name, cache_path)
     utxos = wallet_cache.get("utxos", [])
     if not isinstance(utxos, list):
@@ -340,8 +361,12 @@ def list_cached_unspent(wallet_name: str, cache_file: Path | None = None) -> dic
     }
 
 
-def list_cached_transactions(wallet_name: str, cache_file: Path | None = None) -> dict:
-    cache_path = cache_file or default_wallet_cache_file()
+def list_cached_transactions(
+    wallet_name: str,
+    cache_file: Path | None = None,
+    network: str = NETWORK_MAINNET,
+) -> dict:
+    cache_path = cache_file or default_wallet_cache_file(network=network)
     wallet_cache = read_wallet_cache_entry(wallet_name, cache_path)
     transactions = wallet_cache.get("transactions", [])
     if not isinstance(transactions, list):

@@ -21,6 +21,10 @@ import shlex
 import sys
 from functools import lru_cache
 from pathlib import Path
+from btc.chainparams import (
+    NETWORK_MAINNET,
+    SUPPORTED_NETWORKS,
+)
 from btc.hash import sha256, dbl_sha256, sha256_file, dbl_sha256_file, show
 from btc.private_key_gen import generate_32bytes_private_key, is_valid_privkey
 from btc.btc_address_gen import (
@@ -136,11 +140,12 @@ def cmd_addr(args):
         print("compressed pubkey  :", pub_c.hex())
         print("uncompressed pubkey:", pub_u.hex())
         print()
-        print("P2PKH (compressed pubkey)  :", pubkey_to_p2pkh(pub_c))
-        print("P2PKH (uncompressed pubkey):", pubkey_to_p2pkh(pub_u))
-        print("P2WPKH (bc1q)              :", p2wpkh_bech32_address(pub_c))
-        print("P2SH-P2WPKH (3...)         :", p2sh_p2wpkh_address(pub_c))
-        print("P2TR (bc1p)                :", p2tr_address(pub_c))
+        print("network                     :", args.network)
+        print("P2PKH (compressed pubkey)  :", pubkey_to_p2pkh(pub_c, args.network))
+        print("P2PKH (uncompressed pubkey):", pubkey_to_p2pkh(pub_u, args.network))
+        print("P2WPKH                     :", p2wpkh_bech32_address(pub_c, args.network))
+        print("P2SH-P2WPKH                :", p2sh_p2wpkh_address(pub_c, args.network))
+        print("P2TR                        :", p2tr_address(pub_c, args.network))
         return
 
     try:
@@ -158,12 +163,13 @@ def cmd_addr(args):
     pub_c = public_key_to_compressed(pubkey)
     print("input public key type        :", "compressed" if compressed else "uncompressed")
     if not compressed:
-        print("P2PKH (uncompressed pubkey)  :", pubkey_to_p2pkh(pubkey))
+        print("P2PKH (uncompressed pubkey)  :", pubkey_to_p2pkh(pubkey, args.network))
+    print("network                      :", args.network)
     print("compressed pubkey            :", pub_c.hex())
-    print("P2PKH (compressed pubkey)    :", pubkey_to_p2pkh(pub_c))
-    print("P2WPKH (bc1q)                :", p2wpkh_bech32_address(pub_c))
-    print("P2SH-P2WPKH (3...)           :", p2sh_p2wpkh_address(pub_c))
-    print("P2TR (bc1p)                  :", p2tr_address(pub_c))
+    print("P2PKH (compressed pubkey)    :", pubkey_to_p2pkh(pub_c, args.network))
+    print("P2WPKH                       :", p2wpkh_bech32_address(pub_c, args.network))
+    print("P2SH-P2WPKH                  :", p2sh_p2wpkh_address(pub_c, args.network))
+    print("P2TR                          :", p2tr_address(pub_c, args.network))
 
 
 def cmd_ecdsa_sign(args):
@@ -190,6 +196,8 @@ def cmd_ecdsa_verify(args):
 
 
 def cmd_bitcoin_sign_message(args):
+    if args.network != NETWORK_MAINNET:
+        args.parser.error("bitcoin message signing currently supports mainnet only")
     if args.private_key_hex is not None:
         if args.path is not None or args.password is not None or args.datadir is not None:
             args.parser.error(
@@ -210,7 +218,8 @@ def cmd_bitcoin_sign_message(args):
                 wallet_name=args.wallet_name,
                 derivation_path=args.path,
                 password=args.password,
-                wallet_file=default_wallet_file(args.datadir),
+                wallet_file=default_wallet_file(args.datadir, args.network),
+                network=args.network,
             )
         except WalletError as exc:
             args.parser.error(str(exc))
@@ -246,6 +255,8 @@ def cmd_bitcoin_sign_message(args):
 
 
 def cmd_bitcoin_verify_message(args):
+    if args.network != NETWORK_MAINNET:
+        args.parser.error("bitcoin message verification currently supports mainnet only")
     if args.legacy_addr is not None:
         address = args.legacy_addr
         signature_format = "Bitcoin Core compact"
@@ -267,7 +278,8 @@ def cmd_createwallet(args):
             password=args.password,
             entropy_hex=args.entropy_hex,
             mnemonic=args.mnemonic,
-            wallet_file=default_wallet_file(args.datadir),
+            wallet_file=default_wallet_file(args.datadir, args.network),
+            network=args.network,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
@@ -279,6 +291,7 @@ def cmd_createwallet(args):
             file=sys.stderr,
         )
     print("wallet name :", result["wallet_name"])
+    print("network     :", result["network"])
     if result["mnemonic"] is not None:
         print("mnemonic    :", result["mnemonic"])
     print("encrypted   :", "yes" if result["encrypted"] else "no")
@@ -304,14 +317,16 @@ def cmd_getnewaddress(args):
     try:
         result = get_new_address(
             wallet_name=args.wallet_name,
-            wallet_file=default_wallet_file(args.datadir),
+            wallet_file=default_wallet_file(args.datadir, args.network),
             change=args.change,
             address_type=args.address_type,
+            network=args.network,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
 
     print("wallet name     :", result["wallet_name"])
+    print("network         :", result["network"])
     print("account id      :", result["account_id"])
     print("address         :", result["address"])
     print("address type    :", result["address_type"])
@@ -327,12 +342,14 @@ def cmd_getmnemonic(args):
         result = get_mnemonic(
             wallet_name=args.wallet_name,
             password=args.password,
-            wallet_file=default_wallet_file(args.datadir),
+            wallet_file=default_wallet_file(args.datadir, args.network),
+            network=args.network,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
 
     print("wallet name :", result["wallet_name"])
+    print("network     :", args.network)
     print("mnemonic    :", result["mnemonic"])
 
 
@@ -340,13 +357,15 @@ def cmd_rebuildaddressbook(args):
     try:
         result = rebuild_address_book(
             wallet_name=args.wallet_name,
-            wallet_file=default_wallet_file(args.datadir),
+            wallet_file=default_wallet_file(args.datadir, args.network),
             address_type=args.address_type,
+            network=args.network,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
 
     print("wallet name       :", result["wallet_name"])
+    print("network           :", args.network)
     print("account count     :", result["account_count"])
     print("address count     :", result["address_count"])
     print("recovered entries :", result["recovered_count"])
@@ -358,13 +377,15 @@ def cmd_exportxpub(args):
         result = export_account_xpub(
             wallet_name=args.wallet_name,
             password=args.password,
-            wallet_file=default_wallet_file(args.datadir),
+            wallet_file=default_wallet_file(args.datadir, args.network),
             address_type=args.address_type,
+            network=args.network,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
 
     print("wallet name     :", result["wallet_name"])
+    print("network         :", args.network)
     print("account id      :", result["account_id"])
     print("standard        :", result["standard"])
     print("address type    :", result["address_type"])
@@ -381,11 +402,13 @@ def cmd_derivepub(args):
             args.xpub,
             args.branch,
             args.index,
+            args.network,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
 
     print("address type :", "P2WPKH")
+    print("network      :", args.network)
     print("branch       :", args.branch)
     print("index        :", args.index)
     print("relative path:", f"m/{args.branch}/{args.index}")
@@ -400,16 +423,22 @@ def cmd_syncwallet(args):
     try:
         result = sync_wallet(
             wallet_name=args.wallet_name,
-            wallet_file=default_wallet_file(args.datadir),
-            cache_file=default_wallet_cache_file(args.datadir),
-            backend=EsploraBackend(args.backend_url, args.timeout),
+            wallet_file=default_wallet_file(args.datadir, args.network),
+            cache_file=default_wallet_cache_file(args.datadir, args.network),
+            backend=EsploraBackend(
+                args.backend_url,
+                args.timeout,
+                network=args.network,
+            ),
             include_transactions=not args.no_transactions,
+            network=args.network,
         )
     except (WalletError, EsploraError) as exc:
         args.parser.error(str(exc))
 
     balance = result["balance"]
     print("wallet name        :", result["wallet_name"])
+    print("network            :", args.network)
     print("synced at          :", result["synced_at"])
     print("backend            :", result["backend"]["base_url"])
     print("tip height         :", result["tip"]["height"])
@@ -428,13 +457,15 @@ def cmd_getbalance(args):
     try:
         result = get_cached_balance(
             wallet_name=args.wallet_name,
-            cache_file=default_wallet_cache_file(args.datadir),
+            cache_file=default_wallet_cache_file(args.datadir, args.network),
+            network=args.network,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
 
     balance = result["balance"]
     print("wallet name        :", result["wallet_name"])
+    print("network            :", args.network)
     print("synced at          :", result["synced_at"])
     print("tip height         :", result.get("tip", {}).get("height"))
     print("confirmed balance  :", balance["confirmed"], "sats", f"({_format_btc(balance['confirmed'])})")
@@ -449,7 +480,8 @@ def cmd_listunspent(args):
     try:
         result = list_cached_unspent(
             wallet_name=args.wallet_name,
-            cache_file=default_wallet_cache_file(args.datadir),
+            cache_file=default_wallet_cache_file(args.datadir, args.network),
+            network=args.network,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
@@ -461,6 +493,7 @@ def cmd_listunspent(args):
         if int(utxo.get("confirmations", 0)) >= min_confirmations
     ]
     print("wallet name :", result["wallet_name"])
+    print("network     :", args.network)
     print("synced at   :", result["synced_at"])
     print("utxo count  :", len(utxos))
     for utxo in utxos:
@@ -483,13 +516,15 @@ def cmd_listtransactions(args):
     try:
         result = list_cached_transactions(
             wallet_name=args.wallet_name,
-            cache_file=default_wallet_cache_file(args.datadir),
+            cache_file=default_wallet_cache_file(args.datadir, args.network),
+            network=args.network,
         )
     except WalletError as exc:
         args.parser.error(str(exc))
 
     transactions = result["transactions"][: args.limit]
     print("wallet name        :", result["wallet_name"])
+    print("network            :", args.network)
     print("synced at          :", result["synced_at"])
     print("transaction count  :", len(result["transactions"]))
     print("displayed count    :", len(transactions))
@@ -674,7 +709,7 @@ class BitcoinToolLexer(Lexer):
         return get_line
 
 
-def _run_prompt_toolkit_shell() -> None:
+def _run_prompt_toolkit_shell(network: str) -> None:
     style = Style.from_dict(
         {
             "prompt": "ansigreen bold",
@@ -695,11 +730,17 @@ def _run_prompt_toolkit_shell() -> None:
     )
     print("Bitcoin Tool interactive shell")
     print("Powered by Wen Zhongzhi")
+    print("Network:", network)
     print('Type "help" to show commands and "exit" to quit.')
+    prompt_text = (
+        "bitcoin-tool"
+        if network == NETWORK_MAINNET
+        else f"bitcoin-tool[{network}]"
+    )
 
     while True:
         try:
-            command_line = session.prompt(HTML("<prompt>bitcoin-tool&gt; </prompt>"))
+            command_line = session.prompt(HTML(f"<prompt>{prompt_text}&gt; </prompt>"))
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -724,7 +765,7 @@ def _run_prompt_toolkit_shell() -> None:
             continue
 
         try:
-            run_cli([command, *command_arguments])
+            run_cli(["--network", network, command, *command_arguments])
         except SystemExit:
             pass
 
@@ -768,6 +809,12 @@ class BitcoinToolShell(cmd.Cmd):
     )
     prompt = "bitcoin-tool> "
 
+    def __init__(self, network: str = NETWORK_MAINNET):
+        super().__init__()
+        self.network = network
+        if network != NETWORK_MAINNET:
+            self.prompt = f"bitcoin-tool[{network}]> "
+
     def __getattr__(self, name: str):
         if name.startswith(("do_", "complete_")) and "-" in name:
             return object.__getattribute__(self, name.replace("-", "_"))
@@ -785,7 +832,7 @@ class BitcoinToolShell(cmd.Cmd):
             return
 
         try:
-            run_cli([command, *arguments])
+            run_cli(["--network", self.network, command, *arguments])
         except SystemExit:
             # argparse uses SystemExit for --help and argument errors.
             # Do not exit the interactive shell.
@@ -941,9 +988,9 @@ class BitcoinToolShell(cmd.Cmd):
 
 def cmd_shell(args) -> None:
     if PromptSession is not None:
-        _run_prompt_toolkit_shell()
+        _run_prompt_toolkit_shell(args.network)
     else:
-        BitcoinToolShell().cmdloop()
+        BitcoinToolShell(args.network).cmdloop()
 
 def add_wallet_access_arguments(parser):
     parser.add_argument("--wallet-name", required=True, help="wallet name")
@@ -962,6 +1009,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
+    )
+    parser.add_argument(
+        "--network",
+        choices=SUPPORTED_NETWORKS,
+        default=NETWORK_MAINNET,
+        help="Bitcoin network for address and wallet operations (default: mainnet)",
     )
     
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1224,8 +1277,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_wallet_access_arguments(p_syncwallet)
     p_syncwallet.add_argument(
         "--backend-url",
-        default="https://blockstream.info/api",
-        help="Esplora API base URL",
+        help="Esplora API base URL (default depends on --network)",
     )
     p_syncwallet.add_argument(
         "--timeout",

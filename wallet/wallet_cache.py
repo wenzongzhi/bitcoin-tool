@@ -23,10 +23,14 @@ from pathlib import Path
 
 from filelock import FileLock, Timeout
 
+from btc.chainparams import NETWORK_MAINNET, NETWORK_TESTNET4
 from .wallet import WalletError, default_data_dir
 
 
-WALLET_CACHE_FILENAME = "wallet_cache.json"
+WALLET_CACHE_FILENAMES = {
+    NETWORK_MAINNET: "wallet_cache.json",
+    NETWORK_TESTNET4: "wallet_cache_testnet4.json",
+}
 CACHE_VERSION = 2
 
 
@@ -34,8 +38,15 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def default_wallet_cache_file(data_dir: str | Path | None = None) -> Path:
-    return default_data_dir(data_dir) / WALLET_CACHE_FILENAME
+def default_wallet_cache_file(
+    data_dir: str | Path | None = None,
+    network: str = NETWORK_MAINNET,
+) -> Path:
+    try:
+        filename = WALLET_CACHE_FILENAMES[network]
+    except (KeyError, TypeError) as exc:
+        raise WalletError(f"unsupported wallet network: {network}") from exc
+    return default_data_dir(data_dir) / filename
 
 
 @contextmanager
