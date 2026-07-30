@@ -10,6 +10,7 @@ You can use this tool to complete the following task
 - Sign and verify messages with raw secp256k1 ECDSA signatures
 - Sign and verify P2PKH messages in Bitcoin Core format and P2WPKH messages in BIP322 simple format
 - Create encrypted or plaintext BIP39 wallets with BIP44, BIP49, BIP84, and BIP86 accounts
+- Create isolated mainnet or Testnet4 wallets and addresses
 - Sync issued wallet addresses through an Esplora API and cache balance, UTXOs, and transactions
 - Start an interactive `bitcoin-tool shell` with command completion
 
@@ -93,6 +94,14 @@ $ python bitcoin_tool.py createwallet --wallet-name "my_BTC_02" --entropy-hex "0
 $ python bitcoin_tool.py createwallet --wallet-name "imported_BTC_01" --mnemonic "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art" --password "test-password"
 ```
 
+- create a Testnet4 wallet
+```bash
+$ python bitcoin_tool.py --network testnet4 createwallet --wallet-name "testnet4_BTC_01" --password "test-password"
+$ python bitcoin_tool.py --network testnet4 getnewaddress --wallet-name "testnet4_BTC_01" --address-type p2wpkh
+```
+
+`--network` is a global option and must appear before the command name. It defaults to `mainnet`. Testnet4 wallets use coin type `1`, `tpub` account keys, and test-network address prefixes (`m`/`n`, `2`, `tb1q`, and `tb1p`).
+
 Encrypted wallet creation does not print the mnemonic. Use the explicit command below when it must be viewed:
 ```bash
 $ python bitcoin_tool.py getmnemonic --wallet-name "my_BTC_01" --password "test-password"
@@ -138,6 +147,8 @@ $ python bitcoin_tool.py bitcoin-sign-message --wallet-name "my_BTC_01" --path "
 
 The path must already exist in one account's `issued_addresses`. Wallet message signing currently accepts issued P2PKH and P2WPKH paths. Omit `--password` for a plaintext wallet.
 
+Bitcoin address message signing and verification are currently mainnet-only. Testnet4 wallet keys remain available internally for future transaction signing, but `bitcoin-sign-message` and `bitcoin-verify-message` reject `--network testnet4`.
+
 - derive a change address from a specific account
 ```bash
 $ python bitcoin_tool.py getnewaddress --wallet-name "my_BTC_01" --address-type p2wpkh --change
@@ -162,6 +173,14 @@ $ python bitcoin_tool.py rebuildaddressbook --wallet-name "my_BTC_01"
 - sync issued wallet addresses through the default Esplora backend
 ```bash
 $ python bitcoin_tool.py syncwallet --wallet-name "my_BTC_01"
+```
+
+- sync a Testnet4 wallet
+```bash
+$ python bitcoin_tool.py --network testnet4 syncwallet --wallet-name "testnet4_BTC_01"
+$ python bitcoin_tool.py --network testnet4 getbalance --wallet-name "testnet4_BTC_01"
+$ python bitcoin_tool.py --network testnet4 listunspent --wallet-name "testnet4_BTC_01"
+$ python bitcoin_tool.py --network testnet4 listtransactions --wallet-name "testnet4_BTC_01"
 ```
 
 - sync through a self-hosted Esplora backend
@@ -189,6 +208,7 @@ $ python bitcoin_tool.py listtransactions --wallet-name "my_BTC_01" --limit 50
 - start the interactive shell with completion
 ```bash
 $ python bitcoin_tool.py shell
+$ python bitcoin_tool.py --network testnet4 shell
 ```
 
 Inside the shell, use the command name without `python bitcoin_tool.py`:
@@ -207,6 +227,13 @@ Wallet data is stored outside the source tree by default:
 - Linux: `~/.local/share/bitcoin-tool/wallets.json`
 - macOS: `~/Library/Application Support/bitcoin-tool/wallets.json`
 
+Testnet4 uses separate files in the same directory:
+
+- `wallets_testnet4.json`
+- `wallet_cache_testnet4.json`
+
+Mainnet continues to use `wallets.json` and `wallet_cache.json`; no mainnet file migration or schema rewrite is performed.
+
 Use `--datadir PATH` on a wallet command, or set `BITCOIN_TOOL_DATADIR`, to override this location. Private keys are never stored separately.
 
 Wallet format version 3 stores four independent account objects under `accounts`:
@@ -216,6 +243,8 @@ Wallet format version 3 stores four independent account objects under `accounts`
 - `bip84-account-0`: P2WPKH, `m/84'/0'/0'`
 - `bip86-account-0`: P2TR, `m/86'/0'/0'`
 
+Testnet4 uses the same account structure with paths `m/44'/1'/0'`, `m/49'/1'/0'`, `m/84'/1'/0'`, and `m/86'/1'/0'`.
+
 Each account owns its account xpub, receiving/change indexes, and `issued_addresses`. The account xpub cannot spend coins, but it reveals every receiving and change address in that account. Keep it private unless you intentionally need a watch-only setup.
 
 Wallet format versions 1 and 2 are rejected. There is no automatic migration: recreate the wallet from its mnemonic to obtain the version 3 structure. Wallet cache version 1 is also rejected; remove the old `wallet_cache.json` and run `syncwallet` to create a fresh cache.
@@ -224,7 +253,7 @@ Wallet format versions 1 and 2 are rejected. There is no automatic migration: re
 
 Only addresses already created by `getnewaddress` are synced. If you used addresses outside this tool's issued address book, create or rebuild the address records first.
 
-The default sync backend is Blockstream's public Esplora API at `https://blockstream.info/api`. Querying a public backend reveals the wallet addresses you ask about to that backend. For better privacy, use `--backend-url` with a trusted or self-hosted Esplora server.
+The mainnet default sync backend is Blockstream's public Esplora API at `https://blockstream.info/api`. The Testnet4 default is `https://mempool.space/testnet4/api`. Before querying wallet addresses, `syncwallet` verifies the backend's genesis block against the selected network. Querying a public backend reveals the wallet addresses you ask about to that backend. For better privacy, use `--backend-url` with a trusted or self-hosted Esplora server.
 
 Existing `wallets.json` files in the project root are not moved automatically. Move the file to the user data directory, or use `--datadir` with the old directory explicitly.
 

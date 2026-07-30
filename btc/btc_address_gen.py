@@ -19,6 +19,8 @@ from ecdsa import MalformedPointError, SigningKey, SECP256k1, VerifyingKey
 from ecdsa.ellipticcurve import INFINITY
 from bech32 import CHARSET, bech32_encode, bech32_hrp_expand, bech32_polymod, convertbits
 
+from .chainparams import NETWORK_MAINNET, get_chain_params
+
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 BECH32M_CONST = 0x2BC830A3
 
@@ -116,11 +118,14 @@ def bech32m_encode(hrp: str, data: list[int]) -> str:
     return hrp + "1" + "".join(CHARSET[value] for value in data + checksum)
 
 
-def p2wpkh_bech32_address(pubkey_compressed: bytes) -> str:
+def p2wpkh_bech32_address(
+    pubkey_compressed: bytes,
+    network: str = NETWORK_MAINNET,
+) -> str:
     h160 = hash160(pubkey_compressed)  # 20 bytes
     # witness version 0, program=20 bytes
     data = [0] + list(convertbits(h160, 8, 5, True))
-    return bech32_encode("bc", data)
+    return bech32_encode(get_chain_params(network).bech32_hrp, data)
 
 
 def p2wpkh_script_pubkey(pubkey_compressed: bytes) -> str:
@@ -159,24 +164,30 @@ def p2tr_output_key(pubkey_compressed: bytes) -> bytes:
     return output_point.x().to_bytes(32, "big")
 
 
-def p2tr_address(pubkey_compressed: bytes) -> str:
+def p2tr_address(
+    pubkey_compressed: bytes,
+    network: str = NETWORK_MAINNET,
+) -> str:
     output_key = p2tr_output_key(pubkey_compressed)
     data = [1] + list(convertbits(output_key, 8, 5, True))
-    return bech32m_encode("bc", data)
+    return bech32m_encode(get_chain_params(network).bech32_hrp, data)
 
 
 def p2tr_script_pubkey(pubkey_compressed: bytes) -> str:
     return (b"\x51\x20" + p2tr_output_key(pubkey_compressed)).hex()
 
 
-def p2sh_p2wpkh_address(pubkey_compressed: bytes) -> str:
+def p2sh_p2wpkh_address(
+    pubkey_compressed: bytes,
+    network: str = NETWORK_MAINNET,
+) -> str:
     h160 = hash160(pubkey_compressed)
     redeem_script = b"\x00\x14" + h160  # 0 <20-byte>
     script_hash = hash160(redeem_script)
-    return base58check(b"\x05", script_hash)  # mainnet P2SH
+    return base58check(get_chain_params(network).p2sh_version, script_hash)
 
-def pubkey_to_p2pkh(pubkey: bytes) -> str:
+def pubkey_to_p2pkh(pubkey: bytes, network: str = NETWORK_MAINNET) -> str:
     h160 = hash160(pubkey)
-    payload = b"\x00" + h160  # mainnet P2PKH version byte
+    payload = get_chain_params(network).p2pkh_version + h160
     checksum = sha256(sha256(payload))[:4]
     return base58_encode(payload + checksum)
