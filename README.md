@@ -252,6 +252,8 @@ $ python bitcoin_tool.py --network testnet4 sendtoaddress --wallet-name "testnet
 
 Use `--confirmation-target 6` instead of `--fee-rate-sat-vb` to use the Esplora fee estimate. Use `--include-utxo txid:vout` or `--exclude-utxo txid:vout` for deterministic Testnet4 experiments.
 
+Transient Esplora GET failures are retried twice by default with exponential backoff. Use `--retries N` to change this. Increasing `--timeout` does not fix a server that actively closes the connection. If the default Testnet4 service is unreachable from your network, select another trusted Testnet4 Esplora instance with `--backend-url`; the tool verifies its genesis block before reading wallet data or broadcasting.
+
 Add `--dry-run` to `sendtoaddress` to synchronize, fund, permanently issue any required change address, sign, and save the result without broadcasting.
 
 The same transaction commands support mainnet when `--network` is omitted. Broadcasting on mainnet is blocked unless that invocation includes `--allow-mainnet`; an interactive `yes` confirmation is still required unless `--yes` is also supplied. Review the saved signed JSON with an independent decoder before broadcasting.

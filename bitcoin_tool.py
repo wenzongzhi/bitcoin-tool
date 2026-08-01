@@ -438,6 +438,11 @@ def _format_btc(satoshis: int) -> str:
     return f"{Decimal(satoshis) / Decimal(100_000_000):.8f} BTC"
 
 
+def _runtime_error(exc: Exception) -> None:
+    print(f"error: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+
 def cmd_syncwallet(args):
     try:
         result = sync_wallet(
@@ -448,12 +453,13 @@ def cmd_syncwallet(args):
                 args.backend_url,
                 args.timeout,
                 network=args.network,
+                retries=args.retries,
             ),
             include_transactions=not args.no_transactions,
             network=args.network,
         )
     except (WalletError, EsploraError) as exc:
-        args.parser.error(str(exc))
+        _runtime_error(exc)
 
     balance = result["balance"]
     print("wallet name        :", result["wallet_name"])
@@ -648,7 +654,12 @@ def cmd_decoderawtransaction(args):
 def _sync_for_funding(args, wallet_file: Path, cache_file: Path) -> tuple[str, EsploraBackend | None]:
     if args.cache_only:
         return "local cache", None
-    backend = EsploraBackend(args.backend_url, args.timeout, network=args.network)
+    backend = EsploraBackend(
+        args.backend_url,
+        args.timeout,
+        network=args.network,
+        retries=args.retries,
+    )
     sync_wallet(
         wallet_name=args.wallet_name,
         wallet_file=wallet_file,
@@ -718,7 +729,7 @@ def cmd_fundrawtransaction(args):
         )
         save_json_document(document, output_file)
     except (TransactionError, WalletError, EsploraError) as exc:
-        args.parser.error(str(exc))
+        _runtime_error(exc)
 
     change = next((item for item in document["outputs"] if item["is_change"]), None)
     print("draft id             :", document["draft_id"])
@@ -778,7 +789,7 @@ def cmd_signrawtransactionwithwallet(args):
         )
         save_json_document(signed, output_file)
     except (TransactionError, WalletError) as exc:
-        args.parser.error(str(exc))
+        _runtime_error(exc)
     print("complete          : yes")
     print("txid              :", signed["txid"])
     print("wtxid             :", signed["wtxid"])
@@ -829,7 +840,12 @@ def _confirm_broadcast(
 def _broadcast_document(args, document: dict) -> dict:
     preview_tx, _ = validate_signed_document(document, args.network)
     preview = transaction_metrics(preview_tx)
-    backend = EsploraBackend(args.backend_url, args.timeout, network=args.network)
+    backend = EsploraBackend(
+        args.backend_url,
+        args.timeout,
+        network=args.network,
+        retries=args.retries,
+    )
     _confirm_broadcast(args, preview["txid"], backend.base_url, document)
     return broadcast_signed_transaction(
         document,
@@ -857,7 +873,12 @@ def cmd_sendrawtransaction(args):
                     "--max-fee-sats requires --transaction-file with prevout metadata"
                 )
             metrics = transaction_metrics(tx)
-            backend = EsploraBackend(args.backend_url, args.timeout, network=args.network)
+            backend = EsploraBackend(
+                args.backend_url,
+                args.timeout,
+                network=args.network,
+                retries=args.retries,
+            )
             _confirm_broadcast(args, metrics["txid"], backend.base_url)
             backend.verify_network()
             remote_txid = backend.broadcast_transaction(raw_hex)
@@ -869,7 +890,7 @@ def cmd_sendrawtransaction(args):
                 file=sys.stderr,
             )
     except (TransactionError, EsploraError, WalletError) as exc:
-        args.parser.error(str(exc))
+        _runtime_error(exc)
     print("broadcast accepted:", result["txid"])
     print("network           :", args.network)
     print("backend           :", result["backend"])
@@ -929,7 +950,7 @@ def cmd_sendtoaddress(args):
             return
         result = _broadcast_document(args, signed)
     except (TransactionError, WalletError, EsploraError) as exc:
-        args.parser.error(str(exc))
+        _runtime_error(exc)
     print("broadcast accepted:", result["txid"])
     print("amount            :", args.amount_sats, "sats")
     print("fee               :", signed["fee_sats"], "sats")
@@ -1453,6 +1474,12 @@ def add_backend_arguments(parser):
         help="Esplora API base URL (default depends on --network)",
     )
     parser.add_argument("--timeout", type=int, default=20, help="network timeout in seconds")
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=2,
+        help="retry transient Esplora GET failures this many times (default: 2)",
+    )
 
 
 def add_funding_arguments(parser):
@@ -1779,6 +1806,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="network timeout in seconds",
+    )
+    p_syncwallet.add_argument(
+        "--retries",
+        type=int,
+        default=2,
+        help="retry transient Esplora GET failures this many times (default: 2)",
     )
     p_syncwallet.add_argument(
         "--no-transactions",

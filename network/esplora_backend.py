@@ -16,6 +16,7 @@ limitations under the License.
 
 import json
 import re
+import time
 from decimal import Decimal
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -25,6 +26,7 @@ from btc.chainparams import NETWORK_MAINNET, get_chain_params
 
 DEFAULT_ESPLORA_URL = get_chain_params(NETWORK_MAINNET).default_esplora_url
 MAX_RESPONSE_SIZE = 10 * 1024 * 1024
+RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 class EsploraError(Exception):
@@ -37,6 +39,7 @@ class EsploraBackend:
         base_url: str | None = None,
         timeout: int = 20,
         network: str = NETWORK_MAINNET,
+        retries: int = 2,
     ):
         try:
             self.params = get_chain_params(network)
@@ -49,7 +52,16 @@ class EsploraBackend:
             raise EsploraError("backend URL must start with http:// or https://")
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise EsploraError("backend timeout must be positive")
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+            raise EsploraError("backend retries must be a non-negative integer")
         self.timeout = timeout
+        self.retries = retries
+
+    @staticmethod
+    def _error_detail(exc: BaseException) -> str:
+        if isinstance(exc, URLError):
+            return str(exc.reason)
+        return str(exc)
 
     def _request_text(
         self,
@@ -62,30 +74,46 @@ class EsploraBackend:
         headers = {"User-Agent": "bitcoin-tool/transaction-client"}
         if content_type is not None:
             headers["Content-Type"] = content_type
-        request = Request(
-            f"{self.base_url}{path}",
-            data=data,
-            headers=headers,
-            method=method,
-        )
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                payload = response.read(MAX_RESPONSE_SIZE + 1)
-                if len(payload) > MAX_RESPONSE_SIZE:
-                    raise EsploraError("Esplora response is too large")
-                return payload.decode("utf-8")
-        except HTTPError as exc:
-            detail = exc.read(4096).decode("utf-8", errors="replace").strip()
-            suffix = f": {detail}" if detail else ""
-            raise EsploraError(
-                f"Esplora HTTP error {exc.code} for {path}{suffix}"
-            ) from exc
-        except URLError as exc:
-            raise EsploraError(f"cannot reach Esplora backend: {exc.reason}") from exc
-        except UnicodeDecodeError as exc:
-            raise EsploraError("Esplora response is not valid UTF-8") from exc
-        except OSError as exc:
-            raise EsploraError(f"cannot read Esplora response: {exc}") from exc
+        maximum_attempts = self.retries + 1 if method == "GET" else 1
+        for attempt in range(1, maximum_attempts + 1):
+            request = Request(
+                f"{self.base_url}{path}",
+                data=data,
+                headers=headers,
+                method=method,
+            )
+            try:
+                with urlopen(request, timeout=self.timeout) as response:
+                    payload = response.read(MAX_RESPONSE_SIZE + 1)
+                    if len(payload) > MAX_RESPONSE_SIZE:
+                        raise EsploraError("Esplora response is too large")
+                    return payload.decode("utf-8")
+            except HTTPError as exc:
+                should_retry = (
+                    method == "GET"
+                    and exc.code in RETRYABLE_HTTP_STATUS_CODES
+                    and attempt < maximum_attempts
+                )
+                if not should_retry:
+                    detail = exc.read(4096).decode("utf-8", errors="replace").strip()
+                    suffix = f": {detail}" if detail else ""
+                    raise EsploraError(
+                        f"Esplora {method} {path} returned HTTP {exc.code}{suffix}"
+                    ) from exc
+            except UnicodeDecodeError as exc:
+                raise EsploraError(
+                    f"Esplora {method} {path} response is not valid UTF-8"
+                ) from exc
+            except (URLError, OSError) as exc:
+                if attempt >= maximum_attempts:
+                    attempts = f" after {attempt} attempts" if attempt > 1 else ""
+                    raise EsploraError(
+                        f"Esplora {method} {path} failed{attempts}: "
+                        f"{self._error_detail(exc)}"
+                    ) from exc
+            time.sleep(0.5 * (2 ** (attempt - 1)))
+
+        raise EsploraError(f"Esplora {method} {path} request failed")
 
     def _get_text(self, path: str) -> str:
         return self._request_text(path)
