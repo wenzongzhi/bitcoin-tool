@@ -3,6 +3,7 @@ from .wallet import (
     SUPPORTED_ADDRESS_TYPES,
     WALLET_VERSION,
     WalletError,
+    WalletSigningSession,
     create_wallet,
     default_wallet_file,
     derive_p2wpkh_from_account_xpub,
@@ -17,6 +18,7 @@ from .wallet import (
     mnemonic_from_entropy_hex,
     normalize_mnemonic,
     rebuild_address_book,
+    wallet_requires_password,
 )
 from .wallet_cache import default_wallet_cache_file
 from .wallet_sync import (
@@ -31,6 +33,7 @@ __all__ = [
     "SUPPORTED_ADDRESS_TYPES",
     "WALLET_VERSION",
     "WalletError",
+    "WalletSigningSession",
     "create_wallet",
     "default_wallet_cache_file",
     "default_wallet_file",
@@ -46,6 +49,7 @@ __all__ = [
     "mnemonic_from_entropy_hex",
     "normalize_mnemonic",
     "rebuild_address_book",
+    "wallet_requires_password",
     "get_cached_balance",
     "list_cached_transactions",
     "list_cached_unspent",

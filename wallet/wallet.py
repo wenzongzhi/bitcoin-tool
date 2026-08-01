@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bip32 import BIP32
+from coincurve import PrivateKey
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -958,6 +959,138 @@ def get_wallet_signing_key(
         "private_key_hex": private_key.hex(),
         "public_key_hex": public_key.hex(),
     }
+
+
+def wallet_requires_password(
+    wallet_name: str,
+    wallet_file: Path | None = None,
+    network: str = NETWORK_MAINNET,
+) -> bool:
+    _validate_wallet_name(wallet_name)
+    path = wallet_file or default_wallet_file(network=network)
+    with _locked_wallet_file(path):
+        wallet = _load_wallets(path).get(wallet_name)
+        if not isinstance(wallet, dict):
+            raise WalletError(f'wallet "{wallet_name}" does not exist in "{path}"')
+        _require_current_wallet(wallet, network)
+        encrypted = wallet.get("encrypted")
+        if not isinstance(encrypted, bool):
+            raise WalletError("wallet encryption state is invalid")
+        return encrypted
+
+
+class WalletSigningSession:
+    """Short-lived transaction signer that decrypts a wallet only once."""
+
+    def __init__(
+        self,
+        wallet_name: str,
+        password: str | None = None,
+        wallet_file: Path | None = None,
+        network: str = NETWORK_MAINNET,
+    ):
+        self.wallet_name = wallet_name
+        self.password = password
+        self.wallet_file = wallet_file or default_wallet_file(network=network)
+        self.network = network
+        self._root = None
+        self._entries = None
+
+    def __enter__(self):
+        _validate_wallet_name(self.wallet_name)
+        with _locked_wallet_file(self.wallet_file):
+            wallet = _load_wallets(self.wallet_file).get(self.wallet_name)
+            if not isinstance(wallet, dict):
+                raise WalletError(
+                    f'wallet "{self.wallet_name}" does not exist in "{self.wallet_file}"'
+                )
+            accounts = _require_current_wallet(wallet, self.network)
+            mnemonic = _read_mnemonic(
+                self.wallet_name,
+                wallet,
+                self.password,
+                self.network,
+            )
+            _validate_mnemonic(mnemonic)
+            entries = {}
+            for normalized_type, definition in _account_definitions(self.network).items():
+                account = accounts[definition["account_id"]]
+                _, account_path, _ = _read_account_state(
+                    account,
+                    definition,
+                    BTC_RECEIVE_BRANCH,
+                    self.network,
+                )
+                issued_addresses = account.get("issued_addresses")
+                if not isinstance(issued_addresses, list):
+                    raise WalletError("wallet address book is invalid")
+                for entry in issued_addresses:
+                    normalized = _normalize_address_entry(
+                        definition["account_id"],
+                        definition,
+                        account_path,
+                        entry,
+                    )
+                    path = normalized["path"]
+                    if path in entries:
+                        raise WalletError("wallet contains duplicate issued paths")
+                    entries[path] = (normalized_type, normalized)
+
+        seed = Mnemonic.to_seed(mnemonic, passphrase="")
+        self._root = BIP32.from_seed(
+            seed,
+            network=get_chain_params(self.network).bip32_network,
+        )
+        self._entries = entries
+        mnemonic = None
+        seed = None
+        return self
+
+    def sign_digest(self, metadata: dict, digest: bytes) -> tuple[bytes, bytes]:
+        if self._root is None or self._entries is None:
+            raise WalletError("wallet signing session is not active")
+        if not isinstance(metadata, dict) or not isinstance(digest, bytes) or len(digest) != 32:
+            raise WalletError("invalid transaction signing request")
+        path = metadata.get("derivation_path") or metadata.get("path")
+        match = self._entries.get(path)
+        if match is None:
+            raise WalletError("transaction input path is not an issued wallet address")
+        normalized_type, entry = match
+        expected_type = normalized_type
+        provided_type = str(metadata.get("address_type", "")).lower()
+        if provided_type != expected_type:
+            raise WalletError("transaction input address type does not match wallet")
+        try:
+            script_pubkey = bytes.fromhex(metadata["script_pubkey"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WalletError("transaction input scriptPubKey is invalid") from exc
+        if (
+            metadata.get("address") != entry["address"]
+            or metadata.get("account_id") != entry["account_id"]
+            or script_pubkey.hex() != entry["script_pubkey"]
+        ):
+            raise WalletError("transaction input metadata does not match wallet")
+        try:
+            private_key = self._root.get_privkey_from_path(path)
+        except Exception as exc:
+            raise WalletError("cannot derive transaction signing key") from exc
+        public_key = privkey_to_pubkey(private_key, compressed=True)
+        address, expected_script = _address_and_script(
+            public_key,
+            normalized_type,
+            self.network,
+        )
+        if address != entry["address"] or expected_script != entry["script_pubkey"]:
+            raise WalletError("derived transaction signing key does not match wallet")
+        signature_der = PrivateKey(private_key).sign(digest, hasher=None)
+        private_key = None
+        return signature_der, public_key
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._root = None
+        self._entries = None
+        self.password = None
+        return False
 
 
 def rebuild_address_book(

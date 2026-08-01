@@ -16,9 +16,12 @@ limitations under the License.
 
 import argparse
 import cmd
+import getpass
+import json
 import re
 import shlex
 import sys
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from btc.chainparams import (
@@ -65,7 +68,23 @@ from wallet import (
     mnemonic_from_entropy_hex,
     rebuild_address_book,
     sync_wallet,
+    wallet_requires_password,
 )
+from tx import (
+    TransactionError,
+    broadcast_signed_transaction,
+    create_raw_transaction,
+    decode_transaction,
+    deserialize_transaction_hex,
+    fund_transaction,
+    load_json_document,
+    save_json_document,
+    serialize_transaction_hex,
+    sign_funded_transaction,
+    transaction_metrics,
+    validate_signed_document,
+)
+from tx.builder import parse_outpoint, parse_output_spec
 
 try:
     from prompt_toolkit import PromptSession
@@ -416,7 +435,7 @@ def cmd_derivepub(args):
 
 
 def _format_btc(satoshis: int) -> str:
-    return f"{satoshis / 100_000_000:.8f} BTC"
+    return f"{Decimal(satoshis) / Decimal(100_000_000):.8f} BTC"
 
 
 def cmd_syncwallet(args):
@@ -542,6 +561,382 @@ def cmd_listtransactions(args):
         print("account ids  :", ", ".join(tx.get("account_ids", [])))
         print("address types:", ", ".join(tx.get("address_types", [])))
         print("addresses    :", ", ".join(tx.get("addresses", [])))
+
+
+MAX_TRANSACTION_INPUT_FILE_SIZE = 10 * 1024 * 1024
+
+
+def _read_json_array(path_value: str, description: str) -> list:
+    path = Path(path_value)
+    try:
+        if path.stat().st_size > MAX_TRANSACTION_INPUT_FILE_SIZE:
+            raise TransactionError(f"{description} file is too large")
+        with path.open("r", encoding="utf-8") as file:
+            value = json.load(file)
+    except TransactionError:
+        raise
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TransactionError(f'cannot read {description} file "{path}": {exc}') from exc
+    if not isinstance(value, list):
+        raise TransactionError(f"{description} file must contain a JSON array")
+    return value
+
+
+def _read_raw_transaction_argument(args) -> str:
+    if getattr(args, "raw_tx_hex", None) is not None:
+        return args.raw_tx_hex.strip()
+    path = Path(args.raw_tx_file)
+    try:
+        if path.stat().st_size > MAX_TRANSACTION_INPUT_FILE_SIZE:
+            raise TransactionError("raw transaction file is too large")
+        return path.read_text(encoding="ascii").strip()
+    except TransactionError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise TransactionError(f'cannot read raw transaction file "{path}": {exc}') from exc
+
+
+def _transaction_template_from_args(args):
+    inputs = []
+    for value in args.input or []:
+        txid, vout = parse_outpoint(value)
+        inputs.append({"txid": txid, "vout": vout})
+    if args.inputs_file:
+        inputs.extend(_read_json_array(args.inputs_file, "inputs"))
+
+    outputs = []
+    for value in args.output or []:
+        address, amount_sats = parse_output_spec(value)
+        outputs.append({"address": address, "amount_sats": amount_sats})
+    if args.outputs_file:
+        outputs.extend(_read_json_array(args.outputs_file, "outputs"))
+    return create_raw_transaction(
+        inputs,
+        outputs,
+        args.network,
+        locktime=args.locktime,
+        version=args.tx_version,
+    )
+
+
+def cmd_createrawtransaction(args):
+    try:
+        tx = _transaction_template_from_args(args)
+        raw_hex = serialize_transaction_hex(tx, include_witness=False)
+        decoded = decode_transaction(tx, args.network)
+    except TransactionError as exc:
+        args.parser.error(str(exc))
+    print("raw transaction hex:", raw_hex)
+    print("unsigned txid       :", decoded["txid"])
+    print("size                :", decoded["size"], "bytes")
+    print("input count         :", decoded["input_count"])
+    print("output count        :", decoded["output_count"])
+
+
+def cmd_decoderawtransaction(args):
+    try:
+        raw_hex = _read_raw_transaction_argument(args)
+        decoded = decode_transaction(
+            deserialize_transaction_hex(raw_hex),
+            args.network,
+        )
+    except TransactionError as exc:
+        args.parser.error(str(exc))
+    print(json.dumps(decoded, indent=2))
+
+
+def _sync_for_funding(args, wallet_file: Path, cache_file: Path) -> tuple[str, EsploraBackend | None]:
+    if args.cache_only:
+        return "local cache", None
+    backend = EsploraBackend(args.backend_url, args.timeout, network=args.network)
+    sync_wallet(
+        wallet_name=args.wallet_name,
+        wallet_file=wallet_file,
+        cache_file=cache_file,
+        backend=backend,
+        include_transactions=False,
+        network=args.network,
+    )
+    return "fresh backend synchronization", backend
+
+
+def _funding_fee_rate(args, backend: EsploraBackend | None) -> str:
+    if args.fee_rate_sat_vb is not None:
+        return args.fee_rate_sat_vb
+    if args.cache_only:
+        raise TransactionError(
+            "--confirmation-target requires backend access; use --fee-rate-sat-vb with --cache-only"
+        )
+    if args.confirmation_target <= 0:
+        raise TransactionError("--confirmation-target must be greater than zero")
+    if backend is None:
+        raise TransactionError("fee estimation backend is unavailable")
+    estimates = backend.get_fee_estimates()
+    target = args.confirmation_target
+    estimates_by_target = {
+        int(key): rate
+        for key, rate in estimates.items()
+        if key.isdigit() and int(key) > 0
+    }
+    available = sorted(estimates_by_target)
+    if not estimates_by_target:
+        raise TransactionError("backend returned no usable fee estimates")
+    selected_target = next((item for item in available if item >= target), available[-1])
+    return format(estimates_by_target[selected_target], "f")
+
+
+def _default_transaction_document_path(prefix: str, identifier: str) -> Path:
+    return Path.cwd() / f"{prefix}-{identifier}.json"
+
+
+def cmd_fundrawtransaction(args):
+    wallet_file = default_wallet_file(args.datadir, args.network)
+    cache_file = default_wallet_cache_file(args.datadir, args.network)
+    try:
+        tx = deserialize_transaction_hex(_read_raw_transaction_argument(args))
+        utxo_source, backend = _sync_for_funding(args, wallet_file, cache_file)
+        fee_rate = _funding_fee_rate(args, backend)
+        document = fund_transaction(
+            tx,
+            args.wallet_name,
+            wallet_file,
+            cache_file,
+            args.network,
+            args.address_type,
+            fee_rate,
+            min_confirmations=args.min_confirmations,
+            include_outpoints=args.include_utxo,
+            exclude_outpoints=set(args.exclude_utxo or []),
+            max_fee_sats=args.max_fee_sats,
+            max_cache_age_seconds=args.max_cache_age_seconds,
+            utxo_source=utxo_source,
+        )
+        output_file = (
+            Path(args.output_file)
+            if args.output_file
+            else _default_transaction_document_path("funded", document["draft_id"])
+        )
+        save_json_document(document, output_file)
+    except (TransactionError, WalletError, EsploraError) as exc:
+        args.parser.error(str(exc))
+
+    change = next((item for item in document["outputs"] if item["is_change"]), None)
+    print("draft id             :", document["draft_id"])
+    print("UTXO source           :", document["utxo_source"])
+    print("selected input count  :", len(document["inputs"]))
+    print("total input           :", document["total_input_sats"], "sats")
+    print("destination total     :", document["destination_total_sats"], "sats")
+    print("estimated fee         :", document["estimated_fee_sats"], "sats")
+    print("estimated vsize       :", document["estimated_vsize"], "vB")
+    print("requested fee rate    :", document["requested_fee_rate_sat_vb"], "sat/vB")
+    print("change value          :", change["value"] if change else 0, "sats")
+    print("change address        :", change["address"] if change else "none")
+    print("change output position:", document["change_position"])
+    print("output file           :", output_file.resolve())
+
+
+def _wallet_signing_password(args, wallet_file: Path) -> str | None:
+    try:
+        encrypted = wallet_requires_password(
+            args.wallet_name,
+            wallet_file,
+            network=args.network,
+        )
+    except WalletError:
+        raise
+    password = getattr(args, "password", None)
+    if password is not None:
+        print(
+            "warning: --password can be exposed through shell history and process listings",
+            file=sys.stderr,
+        )
+        return password
+    if encrypted:
+        return getpass.getpass("wallet password: ")
+    return None
+
+
+def cmd_signrawtransactionwithwallet(args):
+    wallet_file = default_wallet_file(args.datadir, args.network)
+    cache_file = default_wallet_cache_file(args.datadir, args.network)
+    try:
+        document = load_json_document(Path(args.transaction_file))
+        password = _wallet_signing_password(args, wallet_file)
+        signed = sign_funded_transaction(
+            document,
+            args.wallet_name,
+            password,
+            wallet_file,
+            cache_file,
+            args.network,
+            max_fee_sats=args.max_fee_sats,
+        )
+        output_file = (
+            Path(args.output_file)
+            if args.output_file
+            else Path(args.transaction_file).with_suffix(".signed.json")
+        )
+        save_json_document(signed, output_file)
+    except (TransactionError, WalletError) as exc:
+        args.parser.error(str(exc))
+    print("complete          : yes")
+    print("txid              :", signed["txid"])
+    print("wtxid             :", signed["wtxid"])
+    print("signed input count:", signed["signed_input_count"])
+    print("vsize             :", signed["vsize"], "vB")
+    print("fee               :", signed["fee_sats"], "sats")
+    print("fee rate          :", signed["fee_rate_sat_vb"], "sat/vB")
+    print("output file       :", output_file.resolve())
+    print("hex               :", signed["hex"])
+
+
+def _confirm_broadcast(
+    args,
+    txid: str,
+    backend_url: str,
+    document: dict | None = None,
+) -> None:
+    if args.network == NETWORK_MAINNET and not args.allow_mainnet:
+        raise TransactionError(
+            "mainnet broadcasting is disabled unless --allow-mainnet is supplied"
+        )
+    print("network:", args.network)
+    print("backend:", backend_url)
+    print("txid   :", txid)
+    if document is not None:
+        destination_total = sum(
+            item["value"] for item in document.get("outputs", []) if not item.get("is_change")
+        )
+        print("destination total:", destination_total, "sats")
+        print("input total      :", sum(item["value"] for item in document["inputs"]), "sats")
+        print("output total     :", sum(item["value"] for item in document["outputs"]), "sats")
+        print("fee              :", document.get("fee_sats"), "sats")
+        print("fee rate         :", document.get("fee_rate_sat_vb"), "sat/vB")
+        print("vsize            :", document.get("vsize"), "vB")
+        for item in document["outputs"]:
+            label = "change" if item.get("is_change") else "destination"
+            print(f"{label} output:", item.get("address"), item["value"], "sats")
+    if args.yes:
+        return
+    try:
+        answer = input('Broadcast this transaction? Type "yes" to continue: ').strip()
+    except EOFError as exc:
+        raise TransactionError("broadcast confirmation requires interactive input or --yes") from exc
+    if answer != "yes":
+        raise TransactionError("broadcast cancelled")
+
+
+def _broadcast_document(args, document: dict) -> dict:
+    preview_tx, _ = validate_signed_document(document, args.network)
+    preview = transaction_metrics(preview_tx)
+    backend = EsploraBackend(args.backend_url, args.timeout, network=args.network)
+    _confirm_broadcast(args, preview["txid"], backend.base_url, document)
+    return broadcast_signed_transaction(
+        document,
+        args.network,
+        backend,
+        cache_file=default_wallet_cache_file(args.datadir, args.network),
+        max_fee_sats=args.max_fee_sats,
+    )
+
+
+def cmd_sendrawtransaction(args):
+    try:
+        if args.transaction_file:
+            document = load_json_document(Path(args.transaction_file))
+            result = _broadcast_document(args, document)
+        else:
+            raw_hex = _read_raw_transaction_argument(args)
+            tx = deserialize_transaction_hex(raw_hex)
+            if not tx.inputs or not tx.outputs:
+                raise TransactionError("transaction must contain at least one input and one output")
+            if any(not item.script_sig and not item.witness for item in tx.inputs):
+                raise TransactionError("raw transaction contains an input with no unlocking data")
+            if args.max_fee_sats is not None:
+                raise TransactionError(
+                    "--max-fee-sats requires --transaction-file with prevout metadata"
+                )
+            metrics = transaction_metrics(tx)
+            backend = EsploraBackend(args.backend_url, args.timeout, network=args.network)
+            _confirm_broadcast(args, metrics["txid"], backend.base_url)
+            backend.verify_network()
+            remote_txid = backend.broadcast_transaction(raw_hex)
+            if remote_txid != metrics["txid"]:
+                raise TransactionError("backend transaction id does not match local txid")
+            result = {**metrics, "backend": backend.base_url}
+            print(
+                "warning: raw hex has no prevout metadata; signatures and fee could not be verified locally",
+                file=sys.stderr,
+            )
+    except (TransactionError, EsploraError, WalletError) as exc:
+        args.parser.error(str(exc))
+    print("broadcast accepted:", result["txid"])
+    print("network           :", args.network)
+    print("backend           :", result["backend"])
+    if result.get("cache_warning"):
+        print("cache warning     :", result["cache_warning"], file=sys.stderr)
+
+
+def cmd_sendtoaddress(args):
+    wallet_file = default_wallet_file(args.datadir, args.network)
+    cache_file = default_wallet_cache_file(args.datadir, args.network)
+    try:
+        template = create_raw_transaction(
+            [],
+            [{"address": args.address, "amount_sats": args.amount_sats}],
+            args.network,
+        )
+        utxo_source, backend = _sync_for_funding(args, wallet_file, cache_file)
+        fee_rate = _funding_fee_rate(args, backend)
+        funded = fund_transaction(
+            template,
+            args.wallet_name,
+            wallet_file,
+            cache_file,
+            args.network,
+            args.address_type,
+            fee_rate,
+            min_confirmations=args.min_confirmations,
+            include_outpoints=args.include_utxo,
+            exclude_outpoints=set(args.exclude_utxo or []),
+            max_fee_sats=args.max_fee_sats,
+            max_cache_age_seconds=args.max_cache_age_seconds,
+            utxo_source=utxo_source,
+        )
+        password = _wallet_signing_password(args, wallet_file)
+        signed = sign_funded_transaction(
+            funded,
+            args.wallet_name,
+            password,
+            wallet_file,
+            cache_file,
+            args.network,
+            max_fee_sats=args.max_fee_sats,
+        )
+        output_file = (
+            Path(args.output_file)
+            if args.output_file
+            else _default_transaction_document_path("signed", funded["draft_id"])
+        )
+        save_json_document(signed, output_file)
+        print("signed transaction :", output_file.resolve())
+        if args.dry_run:
+            print("dry run            : transaction was not broadcast")
+            print("change issued      :", "yes" if signed["change_position"] is not None else "no")
+            print("txid               :", signed["txid"])
+            print("fee                :", signed["fee_sats"], "sats")
+            print("hex                :", signed["hex"])
+            return
+        result = _broadcast_document(args, signed)
+    except (TransactionError, WalletError, EsploraError) as exc:
+        args.parser.error(str(exc))
+    print("broadcast accepted:", result["txid"])
+    print("amount            :", args.amount_sats, "sats")
+    print("fee               :", signed["fee_sats"], "sats")
+    print("change position   :", signed["change_position"])
+    print("network           :", args.network)
+    if result.get("cache_warning"):
+        print("cache warning     :", result["cache_warning"], file=sys.stderr)
 
 
 SHELL_BUILTIN_COMMANDS = {
@@ -973,6 +1368,48 @@ class BitcoinToolShell(cmd.Cmd):
     def complete_listtransactions(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return self._complete_options("listtransactions", text)
 
+    def do_createrawtransaction(self, argument_line: str) -> None:
+        """Create an unsigned P2PKH/P2WPKH transaction template."""
+        self._run_command("createrawtransaction", argument_line)
+
+    def complete_createrawtransaction(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("createrawtransaction", text)
+
+    def do_fundrawtransaction(self, argument_line: str) -> None:
+        """Select wallet UTXOs and add change to a transaction."""
+        self._run_command("fundrawtransaction", argument_line)
+
+    def complete_fundrawtransaction(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("fundrawtransaction", text)
+
+    def do_signrawtransactionwithwallet(self, argument_line: str) -> None:
+        """Sign a funded transaction with wallet keys."""
+        self._run_command("signrawtransactionwithwallet", argument_line)
+
+    def complete_signrawtransactionwithwallet(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("signrawtransactionwithwallet", text)
+
+    def do_decoderawtransaction(self, argument_line: str) -> None:
+        """Decode a legacy or SegWit raw transaction."""
+        self._run_command("decoderawtransaction", argument_line)
+
+    def complete_decoderawtransaction(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("decoderawtransaction", text)
+
+    def do_sendrawtransaction(self, argument_line: str) -> None:
+        """Broadcast a signed transaction through Esplora."""
+        self._run_command("sendrawtransaction", argument_line)
+
+    def complete_sendrawtransaction(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("sendrawtransaction", text)
+
+    def do_sendtoaddress(self, argument_line: str) -> None:
+        """Fund, sign, and broadcast a wallet payment."""
+        self._run_command("sendtoaddress", argument_line)
+
+    def complete_sendtoaddress(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("sendtoaddress", text)
+
     def do_exit(self, argument_line: str) -> bool:
         """Exit the interactive shell."""
         return True
@@ -999,12 +1436,70 @@ def add_wallet_access_arguments(parser):
         help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",
     )
 
+def add_raw_transaction_source(parser, *, include_document: bool = False):
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--raw-tx-hex", help="raw transaction hexadecimal string")
+    group.add_argument("--raw-tx-file", help="file containing raw transaction hex")
+    if include_document:
+        group.add_argument(
+            "--transaction-file",
+            help="signed bitcoin-tool transaction JSON document",
+        )
+
+
+def add_backend_arguments(parser):
+    parser.add_argument(
+        "--backend-url",
+        help="Esplora API base URL (default depends on --network)",
+    )
+    parser.add_argument("--timeout", type=int, default=20, help="network timeout in seconds")
+
+
+def add_funding_arguments(parser):
+    parser.add_argument(
+        "--address-type",
+        choices=("p2pkh", "p2wpkh"),
+        default="p2wpkh",
+        help="wallet input and change type (default: p2wpkh)",
+    )
+    fee_source = parser.add_mutually_exclusive_group(required=True)
+    fee_source.add_argument("--fee-rate-sat-vb", help="exact fee rate in sat/vB")
+    fee_source.add_argument(
+        "--confirmation-target",
+        type=int,
+        help="request an Esplora fee estimate for this block target",
+    )
+    parser.add_argument("--min-confirmations", type=int, default=1)
+    parser.add_argument("--include-utxo", action="append", default=[])
+    parser.add_argument("--exclude-utxo", action="append", default=[])
+    parser.add_argument("--max-fee-sats", type=int)
+    parser.add_argument(
+        "--cache-only",
+        action="store_true",
+        help="use the local cache without backend synchronization",
+    )
+    parser.add_argument("--max-cache-age-seconds", type=int, default=300)
+    add_backend_arguments(parser)
+
+
+def add_broadcast_confirmation_arguments(parser):
+    parser.add_argument(
+        "--allow-mainnet",
+        action="store_true",
+        help="explicitly enable mainnet broadcast for this invocation",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the interactive broadcast confirmation",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bitcoin_tool",
-        description="Bitcoin research CLI tool: hash / keys / address / scripts"
+        description="Bitcoin research CLI tool: hash / keys / address / scripts",
     )
-    
     parser.add_argument(
         "--version",
         action="version",
@@ -1327,6 +1822,107 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum number of transactions to display",
     )
     p_listtransactions.set_defaults(func=cmd_listtransactions, parser=p_listtransactions)
+
+    # createrawtransaction
+    p_create_raw = sub.add_parser(
+        "createrawtransaction",
+        help="create an unsigned P2PKH/P2WPKH raw transaction",
+    )
+    p_create_raw.add_argument(
+        "--input",
+        action="append",
+        help='input in "txid:vout" format; may be repeated',
+    )
+    p_create_raw.add_argument("--inputs-file", help="JSON array of transaction inputs")
+    p_create_raw.add_argument(
+        "--output",
+        action="append",
+        help='output in "address:amount_sats" format; may be repeated',
+    )
+    p_create_raw.add_argument("--outputs-file", help="JSON array of transaction outputs")
+    p_create_raw.add_argument("--locktime", type=int, default=0)
+    p_create_raw.add_argument("--tx-version", type=int, default=2, choices=(1, 2))
+    p_create_raw.set_defaults(func=cmd_createrawtransaction, parser=p_create_raw)
+
+    # decoderawtransaction
+    p_decode_raw = sub.add_parser(
+        "decoderawtransaction",
+        help="decode a legacy or SegWit raw transaction",
+    )
+    add_raw_transaction_source(p_decode_raw)
+    p_decode_raw.set_defaults(func=cmd_decoderawtransaction, parser=p_decode_raw)
+
+    # fundrawtransaction
+    p_fund_raw = sub.add_parser(
+        "fundrawtransaction",
+        help="select wallet UTXOs and add change to a raw transaction",
+    )
+    add_wallet_access_arguments(p_fund_raw)
+    add_raw_transaction_source(p_fund_raw)
+    add_funding_arguments(p_fund_raw)
+    p_fund_raw.add_argument("--output-file", help="funded transaction JSON output path")
+    p_fund_raw.set_defaults(func=cmd_fundrawtransaction, parser=p_fund_raw)
+
+    # signrawtransactionwithwallet
+    p_sign_raw = sub.add_parser(
+        "signrawtransactionwithwallet",
+        help="sign and locally verify a funded transaction document",
+    )
+    add_wallet_access_arguments(p_sign_raw)
+    p_sign_raw.add_argument("--transaction-file", required=True)
+    p_sign_raw.add_argument(
+        "--password",
+        help="wallet password; hidden prompt is safer",
+    )
+    p_sign_raw.add_argument("--max-fee-sats", type=int)
+    p_sign_raw.add_argument("--output-file", help="signed transaction JSON output path")
+    p_sign_raw.set_defaults(func=cmd_signrawtransactionwithwallet, parser=p_sign_raw)
+
+    # sendrawtransaction
+    p_send_raw = sub.add_parser(
+        "sendrawtransaction",
+        help="broadcast a signed transaction through Esplora",
+    )
+    p_send_raw.add_argument(
+        "--datadir",
+        help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",
+    )
+    add_raw_transaction_source(p_send_raw, include_document=True)
+    add_backend_arguments(p_send_raw)
+    p_send_raw.add_argument("--max-fee-sats", type=int)
+    add_broadcast_confirmation_arguments(p_send_raw)
+    p_send_raw.set_defaults(func=cmd_sendrawtransaction, parser=p_send_raw)
+
+    # sendtoaddress
+    p_send_to = sub.add_parser(
+        "sendtoaddress",
+        help="fund, sign, verify, and broadcast a wallet payment",
+    )
+    add_wallet_access_arguments(p_send_to)
+    p_send_to.add_argument(
+        "--to-address",
+        "--address",
+        dest="address",
+        required=True,
+        help="destination address",
+    )
+    p_send_to.add_argument("--amount-sats", type=int, required=True)
+    p_send_to.add_argument(
+        "--password",
+        help="wallet password; hidden prompt is safer",
+    )
+    p_send_to.add_argument(
+        "--output-file",
+        help="save the signed transaction document here before broadcasting",
+    )
+    add_funding_arguments(p_send_to)
+    add_broadcast_confirmation_arguments(p_send_to)
+    p_send_to.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fund and sign but never broadcast",
+    )
+    p_send_to.set_defaults(func=cmd_sendtoaddress, parser=p_send_to)
 
     # shell
     p_shell = sub.add_parser(

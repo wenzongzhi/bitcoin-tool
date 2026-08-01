@@ -1,5 +1,7 @@
 # Bitcoin tool for study
-This is a open source bitcoin tool.
+This is an open source Bitcoin tool for study.
+
+> **Warning:** This is an educational hot-wallet implementation. Do not use it to custody significant funds. Complete Testnet4 testing before any mainnet use. Public Esplora queries reveal queried wallet addresses to the backend.
 You can use this tool to complete the following task
 - Calculate the hash value of any file and any string
 - Generate a 32 bytes (256 bit) Bitcoin private key
@@ -12,6 +14,7 @@ You can use this tool to complete the following task
 - Create encrypted or plaintext BIP39 wallets with BIP44, BIP49, BIP84, and BIP86 accounts
 - Create isolated mainnet or Testnet4 wallets and addresses
 - Sync issued wallet addresses through an Esplora API and cache balance, UTXOs, and transactions
+- Create, fund, sign, decode, and broadcast P2PKH/P2WPKH transactions
 - Start an interactive `bitcoin-tool shell` with command completion
 
 ## Operating environment
@@ -204,6 +207,60 @@ $ python bitcoin_tool.py listunspent --wallet-name "my_BTC_01" --min-confirmatio
 $ python bitcoin_tool.py listtransactions --wallet-name "my_BTC_01"
 $ python bitcoin_tool.py listtransactions --wallet-name "my_BTC_01" --limit 50
 ```
+
+## Raw transactions
+
+The first transaction release supports confirmed P2PKH or native P2WPKH wallet inputs, `SIGHASH_ALL`, deterministic largest-first coin selection, BIP44/BIP84 change, exact decimal sat/vB fee rates, dust handling, and Esplora broadcasting. A transaction cannot mix P2PKH and P2WPKH inputs.
+
+Start on Testnet4. Create an unsigned destination template:
+
+```bash
+$ python bitcoin_tool.py --network testnet4 createrawtransaction --output "tb1q...:25000"
+```
+
+Fund the template from the wallet's confirmed UTXO cache. By default this synchronizes the wallet first; `--cache-only` explicitly uses an existing cache:
+
+```bash
+$ python bitcoin_tool.py --network testnet4 fundrawtransaction --wallet-name "testnet4_BTC_01" --raw-tx-hex "<unsigned-hex>" --address-type p2wpkh --fee-rate-sat-vb 2 --max-fee-sats 5000
+```
+
+The command writes a versioned funded JSON document containing the unsigned transaction and its prevout metadata. Selected UTXOs are temporarily reserved, and an issued change index is never rolled back or reused.
+
+Sign and locally verify the funded document. Encrypted wallets prompt for the password without echoing it:
+
+```bash
+$ python bitcoin_tool.py --network testnet4 signrawtransactionwithwallet --wallet-name "testnet4_BTC_01" --transaction-file "funded-<draft-id>.json" --max-fee-sats 5000
+```
+
+Decode either legacy or SegWit raw hex:
+
+```bash
+$ python bitcoin_tool.py --network testnet4 decoderawtransaction --raw-tx-hex "<signed-hex>"
+```
+
+Broadcast the signed document after local signature, amount, fee, network, txid, and serialization checks:
+
+```bash
+$ python bitcoin_tool.py --network testnet4 sendrawtransaction --transaction-file "funded-<draft-id>.signed.json"
+```
+
+`sendtoaddress` runs synchronization, funding, change issuance, signing, local verification, signed-document persistence, confirmation, and broadcast as one command:
+
+```bash
+$ python bitcoin_tool.py --network testnet4 sendtoaddress --wallet-name "testnet4_BTC_01" --to-address "tb1q..." --amount-sats 25000 --address-type p2wpkh --fee-rate-sat-vb 2 --max-fee-sats 5000
+```
+
+Use `--confirmation-target 6` instead of `--fee-rate-sat-vb` to use the Esplora fee estimate. Use `--include-utxo txid:vout` or `--exclude-utxo txid:vout` for deterministic Testnet4 experiments.
+
+Add `--dry-run` to `sendtoaddress` to synchronize, fund, permanently issue any required change address, sign, and save the result without broadcasting.
+
+The same transaction commands support mainnet when `--network` is omitted. Broadcasting on mainnet is blocked unless that invocation includes `--allow-mainnet`; an interactive `yes` confirmation is still required unless `--yes` is also supplied. Review the saved signed JSON with an independent decoder before broadcasting.
+
+This release does not spend P2SH-P2WPKH or P2TR outputs and does not implement mixed input types, PSBT, RBF, fee bumping, or Taproot transaction signing.
+
+All transaction amounts and UTXO values are integer satoshis. Fee rates are exact decimal sat/vB values and fees are rounded upward to satoshis. CLI txids use normal display byte order; outpoint hashes are reversed to little-endian only during raw transaction serialization.
+
+Funded and signed files are versioned JSON documents (`bitcoin-tool-funded-transaction` and `bitcoin-tool-signed-transaction`, version `1`). A funded document records the selected outpoints, prevout values/scripts/addresses/paths/accounts, unsigned transaction hex, outputs, fee request, change position, wallet, network, and draft reservation ID. Signing treats every field as untrusted and checks it against the raw transaction, current wallet address book, UTXO cache, and draft reservation before deriving a private key. Unsupported document versions fail explicitly; there is no silent format conversion.
 
 - start the interactive shell with completion
 ```bash

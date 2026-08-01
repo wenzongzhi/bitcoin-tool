@@ -16,6 +16,7 @@ limitations under the License.
 
 import json
 import re
+from decimal import Decimal
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -23,6 +24,7 @@ from urllib.request import Request, urlopen
 from btc.chainparams import NETWORK_MAINNET, get_chain_params
 
 DEFAULT_ESPLORA_URL = get_chain_params(NETWORK_MAINNET).default_esplora_url
+MAX_RESPONSE_SIZE = 10 * 1024 * 1024
 
 
 class EsploraError(Exception):
@@ -45,29 +47,53 @@ class EsploraBackend:
         self.base_url = base_url.rstrip("/")
         if not self.base_url.startswith(("http://", "https://")):
             raise EsploraError("backend URL must start with http:// or https://")
-        if timeout <= 0:
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise EsploraError("backend timeout must be positive")
         self.timeout = timeout
 
-    def _get_text(self, path: str) -> str:
+    def _request_text(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        data: bytes | None = None,
+        content_type: str | None = None,
+    ) -> str:
+        headers = {"User-Agent": "bitcoin-tool/transaction-client"}
+        if content_type is not None:
+            headers["Content-Type"] = content_type
         request = Request(
             f"{self.base_url}{path}",
-            headers={"User-Agent": "bitcoin-tool/utxo-sync"},
+            data=data,
+            headers=headers,
+            method=method,
         )
         try:
             with urlopen(request, timeout=self.timeout) as response:
-                return response.read().decode("utf-8")
+                payload = response.read(MAX_RESPONSE_SIZE + 1)
+                if len(payload) > MAX_RESPONSE_SIZE:
+                    raise EsploraError("Esplora response is too large")
+                return payload.decode("utf-8")
         except HTTPError as exc:
-            raise EsploraError(f"Esplora HTTP error {exc.code} for {path}") from exc
+            detail = exc.read(4096).decode("utf-8", errors="replace").strip()
+            suffix = f": {detail}" if detail else ""
+            raise EsploraError(
+                f"Esplora HTTP error {exc.code} for {path}{suffix}"
+            ) from exc
         except URLError as exc:
             raise EsploraError(f"cannot reach Esplora backend: {exc.reason}") from exc
+        except UnicodeDecodeError as exc:
+            raise EsploraError("Esplora response is not valid UTF-8") from exc
         except OSError as exc:
             raise EsploraError(f"cannot read Esplora response: {exc}") from exc
+
+    def _get_text(self, path: str) -> str:
+        return self._request_text(path)
 
     def _get_json(self, path: str):
         text = self._get_text(path)
         try:
-            return json.loads(text)
+            return json.loads(text, parse_float=Decimal)
         except json.JSONDecodeError as exc:
             raise EsploraError(f"invalid JSON response for {path}") from exc
 
@@ -115,3 +141,43 @@ class EsploraBackend:
         if not isinstance(data, list):
             raise EsploraError("invalid address transaction response")
         return data
+
+    def get_transaction_hex(self, txid: str) -> str:
+        if not isinstance(txid, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", txid):
+            raise EsploraError("transaction id must be 64 hexadecimal characters")
+        raw_hex = self._get_text(f"/tx/{txid.lower()}/hex").strip()
+        if not raw_hex or len(raw_hex) % 2 or not re.fullmatch(r"[0-9a-fA-F]+", raw_hex):
+            raise EsploraError("invalid raw transaction response")
+        return raw_hex.lower()
+
+    def get_fee_estimates(self) -> dict[str, Decimal]:
+        data = self._get_json("/fee-estimates")
+        if not isinstance(data, dict):
+            raise EsploraError("invalid fee estimates response")
+        estimates = {}
+        for target, rate in data.items():
+            if not isinstance(target, str) or not isinstance(rate, (int, Decimal)):
+                raise EsploraError("invalid fee estimates response")
+            normalized_rate = Decimal(rate)
+            if isinstance(rate, bool) or not normalized_rate.is_finite() or normalized_rate <= 0:
+                raise EsploraError("invalid fee estimates response")
+            estimates[target] = normalized_rate
+        return estimates
+
+    def broadcast_transaction(self, raw_tx_hex: str) -> str:
+        if (
+            not isinstance(raw_tx_hex, str)
+            or not raw_tx_hex
+            or len(raw_tx_hex) % 2
+            or not re.fullmatch(r"[0-9a-fA-F]+", raw_tx_hex)
+        ):
+            raise EsploraError("raw transaction must be an even-length hexadecimal string")
+        txid = self._request_text(
+            "/tx",
+            method="POST",
+            data=raw_tx_hex.lower().encode("ascii"),
+            content_type="text/plain",
+        ).strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", txid):
+            raise EsploraError("invalid broadcast transaction id response")
+        return txid.lower()
