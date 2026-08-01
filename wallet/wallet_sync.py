@@ -314,6 +314,35 @@ def sync_wallet(
 
     with locked_cache_file(cache_path):
         cache = load_wallet_cache(cache_path)
+        previous = cache.get("wallets", {}).get(wallet_name, {})
+        if isinstance(previous, dict):
+            reservations = previous.get("reserved_outpoints", {})
+            pending = previous.get("pending_transactions", [])
+            pending_spent = previous.get("pending_spent_outpoints", {})
+            if isinstance(reservations, dict):
+                wallet_cache["reserved_outpoints"] = reservations
+            if isinstance(pending, list):
+                confirmed_txids = {
+                    tx["txid"] for tx in transactions if tx.get("confirmed") is True
+                }
+                wallet_cache["pending_transactions"] = [
+                    item
+                    for item in pending
+                    if isinstance(item, dict)
+                    and item.get("txid") not in confirmed_txids
+                ]
+                active_pending_txids = {
+                    item.get("txid")
+                    for item in wallet_cache["pending_transactions"]
+                    if isinstance(item, dict)
+                }
+                if isinstance(pending_spent, dict):
+                    wallet_cache["pending_spent_outpoints"] = {
+                        outpoint: item
+                        for outpoint, item in pending_spent.items()
+                        if isinstance(item, dict)
+                        and item.get("spending_txid") in active_pending_txids
+                    }
         cache["version"] = CACHE_VERSION
         cache.setdefault("wallets", {})[wallet_name] = wallet_cache
         save_wallet_cache(cache, cache_path)
