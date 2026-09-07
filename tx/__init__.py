@@ -16,6 +16,7 @@ from .document import (
 from .errors import TransactionError
 from .workflow import (
     broadcast_signed_transaction,
+    fund_all_transaction,
     fund_transaction,
     record_successful_broadcast,
     sign_funded_transaction,
@@ -27,6 +28,7 @@ __all__ = [
     "create_raw_transaction",
     "decode_transaction",
     "deserialize_transaction_hex",
+    "fund_all_transaction",
     "fund_transaction",
     "load_json_document",
     "record_successful_broadcast",
