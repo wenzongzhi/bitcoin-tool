@@ -29,6 +29,7 @@ from .coin_selection import (
     DUST_THRESHOLDS,
     fee_for_vsize,
     parse_fee_rate,
+    select_all_coins,
     select_coins,
 )
 from .document import (
@@ -40,7 +41,7 @@ from .document import (
 )
 from .errors import TransactionError
 from .model import Prevout, Transaction, TxInput, TxOutput
-from .script import classify_script_pubkey
+from .script import address_to_script_pubkey, classify_script_pubkey
 from .signer import sign_transaction
 from .verifier import verify_all_inputs
 
@@ -254,6 +255,123 @@ def fund_transaction(
         raise
 
 
+def fund_all_transaction(
+    destination_address: str,
+    wallet_name: str,
+    cache_file: Path,
+    network: str,
+    address_type: str,
+    fee_rate_value: str | int | Decimal,
+    *,
+    min_confirmations: int = 1,
+    exclude_outpoints: set[str] | None = None,
+    max_fee_sats: int | None = None,
+    max_cache_age_seconds: int = 300,
+    utxo_source: str = "local cache",
+) -> dict:
+    """Fund a one-output transaction with every eligible wallet UTXO and no change."""
+    if max_cache_age_seconds < 0:
+        raise TransactionError("max cache age must not be negative")
+    if max_fee_sats is not None and (
+        isinstance(max_fee_sats, bool)
+        or not isinstance(max_fee_sats, int)
+        or max_fee_sats < 0
+    ):
+        raise TransactionError("max fee must be a non-negative integer")
+    address_type = address_type.lower()
+    if address_type not in {"p2pkh", "p2wpkh"}:
+        raise TransactionError("funding supports only p2pkh and p2wpkh")
+    destination_script = address_to_script_pubkey(destination_address, network)
+    fee_rate = parse_fee_rate(fee_rate_value)
+    draft_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc)
+
+    with locked_cache_file(cache_file):
+        cache = load_wallet_cache(cache_file)
+        wallet_cache = cache.get("wallets", {}).get(wallet_name)
+        if not isinstance(wallet_cache, dict):
+            raise TransactionError(f'wallet "{wallet_name}" has no synced UTXO cache')
+        synced_at = _parse_timestamp(wallet_cache.get("synced_at"), "sync")
+        cache_age = max(int((now - synced_at).total_seconds()), 0)
+        if cache_age > max_cache_age_seconds:
+            raise TransactionError(
+                f"wallet cache is stale ({cache_age} seconds old); run syncwallet or increase max cache age"
+            )
+        active_reservations = _cleanup_reservations(wallet_cache, now)
+        pending_spent = wallet_cache.get("pending_spent_outpoints", {})
+        if not isinstance(pending_spent, dict):
+            raise TransactionError("wallet pending-spent outpoints are invalid")
+        selection = select_all_coins(
+            wallet_cache.get("utxos", []),
+            destination_script,
+            address_type,
+            fee_rate,
+            min_confirmations=min_confirmations,
+            exclude_outpoints=exclude_outpoints,
+            reserved_outpoints=set(active_reservations) | set(pending_spent),
+            max_fee_sats=max_fee_sats,
+        )
+        reserved_at = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        for selected in selection["selected"]:
+            active_reservations[selected["outpoint"]] = {
+                "draft_id": draft_id,
+                "reserved_at": reserved_at,
+            }
+        wallet_cache["reserved_outpoints"] = active_reservations
+        save_wallet_cache(cache, cache_file)
+
+    try:
+        funded_tx = Transaction(
+            2,
+            [TxInput(item["txid"], item["vout"]) for item in selection["selected"]],
+            [TxOutput(selection["destination_total_sats"], destination_script)],
+            0,
+        )
+        input_metadata = [
+            {
+                "txid": item["txid"],
+                "vout": item["vout"],
+                "value": item["value"],
+                "script_pubkey": item["script_pubkey"],
+                "address": item["address"],
+                "address_type": item["address_type"].lower(),
+                "derivation_path": item["path"],
+                "branch": item["branch"],
+                "index": item["index"],
+                "account_id": item["account_id"],
+            }
+            for item in selection["selected"]
+        ]
+        output_metadata = transaction_output_metadata(funded_tx, network)
+        output_metadata[0]["is_change"] = False
+        document = {
+            "format": FUNDED_FORMAT,
+            "version": DOCUMENT_VERSION,
+            "network": network,
+            "wallet_name": wallet_name,
+            "draft_id": draft_id,
+            "created_at": utc_now(),
+            "utxo_source": utxo_source,
+            "cache_file": str(cache_file),
+            "unsigned_tx_hex": serialize_transaction_hex(funded_tx, include_witness=False),
+            "inputs": input_metadata,
+            "outputs": output_metadata,
+            "total_input_sats": selection["total_input_sats"],
+            "destination_total_sats": selection["destination_total_sats"],
+            "estimated_fee_sats": selection["estimated_fee_sats"],
+            "estimated_vsize": selection["estimated_vsize"],
+            "requested_fee_rate_sat_vb": format(fee_rate, "f"),
+            "max_fee_sats": max_fee_sats,
+            "change_position": None,
+            "send_all": True,
+        }
+        validate_funded_document(document, network, wallet_name)
+        return document
+    except Exception:
+        _release_draft(cache_file, wallet_name, draft_id)
+        raise
+
+
 def _validate_prevouts_against_wallet_and_cache(
     prevouts: list[Prevout],
     outputs: list[dict],
@@ -329,6 +447,7 @@ def sign_funded_transaction(
     network: str,
     *,
     max_fee_sats: int | None = None,
+    final_fee_limit_message: bool = False,
 ) -> dict:
     tx, prevouts = validate_funded_document(document, network, wallet_name)
     _validate_prevouts_against_wallet_and_cache(
@@ -373,6 +492,15 @@ def sign_funded_transaction(
             raise TransactionError("could not reach requested fee rate after signing")
 
     if effective_max_fee is not None and signing_result["fee_sats"] > effective_max_fee:
+        try:
+            _release_draft(cache_file, wallet_name, document["draft_id"])
+        except (TransactionError, WalletError):
+            pass
+        if final_fee_limit_message:
+            raise TransactionError(
+                f"final fee {signing_result['fee_sats']} sats exceeds max fee "
+                f"{effective_max_fee} sats; transaction was not broadcast"
+            )
         raise TransactionError(
             f'signed fee {signing_result["fee_sats"]} exceeds max fee {effective_max_fee}'
         )

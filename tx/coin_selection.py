@@ -6,6 +6,7 @@ import re
 from .codec import encode_compact_size
 from .errors import TransactionError
 from .model import TxOutput
+from .script import classify_script_pubkey
 
 
 DUST_THRESHOLDS = {
@@ -233,4 +234,84 @@ def select_coins(
         "selected": selected,
         "total_input_sats": sum(item["value"] for item in selected),
         "destination_total_sats": destination_total,
+    }
+
+
+def select_all_coins(
+    utxos: list[dict],
+    destination_script_pubkey: bytes,
+    address_type: str,
+    fee_rate: Decimal,
+    *,
+    min_confirmations: int = 1,
+    exclude_outpoints: set[str] | None = None,
+    reserved_outpoints: set[str] | None = None,
+    max_fee_sats: int | None = None,
+) -> dict:
+    """Select every eligible UTXO and subtract the fee from one destination output."""
+    if min_confirmations < 1:
+        raise TransactionError("min confirmations must be at least 1")
+    if max_fee_sats is not None and (
+        isinstance(max_fee_sats, bool)
+        or not isinstance(max_fee_sats, int)
+        or max_fee_sats < 0
+    ):
+        raise TransactionError("max fee must be a non-negative integer")
+    address_type = address_type.lower()
+    if address_type not in DUST_THRESHOLDS:
+        raise TransactionError("coin selection supports only p2pkh and p2wpkh")
+    if not isinstance(destination_script_pubkey, bytes) or not destination_script_pubkey:
+        raise TransactionError("destination scriptPubKey is invalid")
+
+    exclude_outpoints = exclude_outpoints or set()
+    reserved_outpoints = reserved_outpoints or set()
+    selected = sorted(
+        (
+            utxo
+            for utxo in (_normalize_cached_utxo(item) for item in utxos)
+            if utxo["address_type"] == address_type
+            and utxo.get("confirmed") is True
+            and isinstance(utxo.get("confirmations"), int)
+            and utxo["confirmations"] >= min_confirmations
+            and utxo["outpoint"] not in exclude_outpoints
+            and utxo["outpoint"] not in reserved_outpoints
+        ),
+        key=lambda item: (-item["value"], item["txid"], item["vout"]),
+    )
+    if not selected:
+        raise TransactionError("wallet has no eligible UTXOs to send")
+
+    output_template = TxOutput(0, destination_script_pubkey)
+    estimated_vsize = estimate_signed_vsize(
+        len(selected),
+        address_type,
+        [output_template],
+    )
+    estimated_fee = fee_for_vsize(estimated_vsize, fee_rate)
+    if max_fee_sats is not None and estimated_fee > max_fee_sats:
+        raise TransactionError(
+            f"estimated fee {estimated_fee} sats exceeds max fee {max_fee_sats} sats"
+        )
+
+    total_input = sum(item["value"] for item in selected)
+    destination_value = total_input - estimated_fee
+    if destination_value <= 0:
+        raise TransactionError(
+            "insufficient funds: "
+            f"available={total_input} sats, estimated_fee={estimated_fee} sats"
+        )
+    destination_type = classify_script_pubkey(destination_script_pubkey)
+    if destination_type is None:
+        raise TransactionError("sendall supports only P2PKH and P2WPKH destinations")
+    if destination_value < DUST_THRESHOLDS[destination_type]:
+        raise TransactionError(
+            f"sendall destination would be dust ({destination_value} sats)"
+        )
+
+    return {
+        "selected": selected,
+        "total_input_sats": total_input,
+        "destination_total_sats": destination_value,
+        "estimated_fee_sats": estimated_fee,
+        "estimated_vsize": estimated_vsize,
     }

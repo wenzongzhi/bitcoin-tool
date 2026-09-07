@@ -14,7 +14,7 @@ You can use this tool to complete the following task
 - Create encrypted or plaintext BIP39 wallets with BIP44, BIP49, BIP84, and BIP86 accounts
 - Create isolated mainnet or Testnet4 wallets and addresses
 - Sync issued wallet addresses through an Esplora API and cache balance, UTXOs, and transactions
-- Create, fund, sign, decode, and broadcast P2PKH/P2WPKH transactions
+- Create, fund, sign, decode, broadcast, and sweep P2PKH/P2WPKH transactions
 - Start an interactive `bitcoin-tool shell` with command completion
 
 ## Operating environment
@@ -250,11 +250,21 @@ $ python bitcoin_tool.py --network testnet4 sendrawtransaction --transaction-fil
 $ python bitcoin_tool.py --network testnet4 sendtoaddress --wallet-name "testnet4_BTC_01" --to-address "tb1q..." --amount-sats 25000 --address-type p2wpkh --fee-rate-sat-vb 2 --max-fee-sats 5000
 ```
 
-Use `--confirmation-target 6` instead of `--fee-rate-sat-vb` to use the Esplora fee estimate. Use `--include-utxo txid:vout` or `--exclude-utxo txid:vout` for deterministic Testnet4 experiments.
+`sendall` spends every eligible confirmed UTXO of the selected wallet input type into one destination output. The destination amount is the total input value minus the fee, and no change address or change output is created:
+
+```bash
+$ python bitcoin_tool.py --network testnet4 sendall --wallet-name "testnet4_BTC_01" --to-address "tb1q..." --address-type p2wpkh --fee-rate-sat-vb 2 --max-fee-sats 5000
+```
+
+UTXOs below `--min-confirmations`, explicitly named by `--exclude-utxo`, reserved by another draft, or recorded as pending-spent are not eligible. P2PKH and P2WPKH inputs cannot be mixed, so choose the account to sweep with `--address-type`.
+
+`--max-fee-sats` is a hard ceiling. `sendall` rejects the draft before signing when the estimated fee exceeds it, and performs the check again against the final signed transaction before any broadcast attempt.
+
+Use `--confirmation-target 6` instead of `--fee-rate-sat-vb` to use the Esplora fee estimate. `fundrawtransaction` and `sendtoaddress` accept `--include-utxo txid:vout`; all three funding commands accept `--exclude-utxo txid:vout` for deterministic Testnet4 experiments.
 
 Transient Esplora GET failures are retried twice by default with exponential backoff. Use `--retries N` to change this. Increasing `--timeout` does not fix a server that actively closes the connection. If the default Testnet4 service is unreachable from your network, select another trusted Testnet4 Esplora instance with `--backend-url`; the tool verifies its genesis block before reading wallet data or broadcasting.
 
-Add `--dry-run` to `sendtoaddress` to synchronize, fund, permanently issue any required change address, sign, and save the result without broadcasting.
+Add `--dry-run` to `sendtoaddress` or `sendall` to synchronize, fund, sign, and save the result without broadcasting. `sendtoaddress` permanently issues any required change address; `sendall` never creates change.
 
 The same transaction commands support mainnet when `--network` is omitted. Broadcasting on mainnet is blocked unless that invocation includes `--allow-mainnet`; an interactive `yes` confirmation is still required unless `--yes` is also supplied. Review the saved signed JSON with an independent decoder before broadcasting.
 

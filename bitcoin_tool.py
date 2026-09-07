@@ -76,6 +76,7 @@ from tx import (
     create_raw_transaction,
     decode_transaction,
     deserialize_transaction_hex,
+    fund_all_transaction,
     fund_transaction,
     load_json_document,
     save_json_document,
@@ -960,6 +961,63 @@ def cmd_sendtoaddress(args):
         print("cache warning     :", result["cache_warning"], file=sys.stderr)
 
 
+def cmd_sendall(args):
+    wallet_file = default_wallet_file(args.datadir, args.network)
+    cache_file = default_wallet_cache_file(args.datadir, args.network)
+    try:
+        utxo_source, backend = _sync_for_funding(args, wallet_file, cache_file)
+        fee_rate = _funding_fee_rate(args, backend)
+        funded = fund_all_transaction(
+            args.address,
+            args.wallet_name,
+            cache_file,
+            args.network,
+            args.address_type,
+            fee_rate,
+            min_confirmations=args.min_confirmations,
+            exclude_outpoints=set(args.exclude_utxo or []),
+            max_fee_sats=args.max_fee_sats,
+            max_cache_age_seconds=args.max_cache_age_seconds,
+            utxo_source=utxo_source,
+        )
+        password = _wallet_signing_password(args, wallet_file)
+        signed = sign_funded_transaction(
+            funded,
+            args.wallet_name,
+            password,
+            wallet_file,
+            cache_file,
+            args.network,
+            max_fee_sats=args.max_fee_sats,
+            final_fee_limit_message=True,
+        )
+        output_file = (
+            Path(args.output_file)
+            if args.output_file
+            else _default_transaction_document_path("signed", funded["draft_id"])
+        )
+        save_json_document(signed, output_file)
+        print("signed transaction :", output_file.resolve())
+        if args.dry_run:
+            print("dry run            : transaction was not broadcast")
+            print("txid               :", signed["txid"])
+            print("amount             :", signed["outputs"][0]["value"], "sats")
+            print("fee               :", signed["fee_sats"], "sats")
+            print("hex               :", signed["hex"])
+            return
+        result = _broadcast_document(args, signed)
+    except (TransactionError, WalletError, EsploraError) as exc:
+        _runtime_error(exc)
+    print("broadcast accepted:", result["txid"])
+    print("amount            :", signed["outputs"][0]["value"], "sats")
+    print("fee               :", signed["fee_sats"], "sats")
+    print("input count       :", len(signed["inputs"]))
+    print("change position   :", signed["change_position"])
+    print("network           :", args.network)
+    if result.get("cache_warning"):
+        print("cache warning     :", result["cache_warning"], file=sys.stderr)
+
+
 SHELL_BUILTIN_COMMANDS = {
     "exit": "Exit the interactive shell.",
     "quit": "Exit the interactive shell.",
@@ -1431,6 +1489,13 @@ class BitcoinToolShell(cmd.Cmd):
     def complete_sendtoaddress(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return self._complete_options("sendtoaddress", text)
 
+    def do_sendall(self, argument_line: str) -> None:
+        """Spend all eligible wallet UTXOs to one address without change."""
+        self._run_command("sendall", argument_line)
+
+    def complete_sendall(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("sendall", text)
+
     def do_exit(self, argument_line: str) -> bool:
         """Exit the interactive shell."""
         return True
@@ -1482,12 +1547,12 @@ def add_backend_arguments(parser):
     )
 
 
-def add_funding_arguments(parser):
+def add_funding_arguments(parser, *, include_utxo: bool = True):
     parser.add_argument(
         "--address-type",
         choices=("p2pkh", "p2wpkh"),
         default="p2wpkh",
-        help="wallet input and change type (default: p2wpkh)",
+        help="wallet input type (default: p2wpkh)",
     )
     fee_source = parser.add_mutually_exclusive_group(required=True)
     fee_source.add_argument("--fee-rate-sat-vb", help="exact fee rate in sat/vB")
@@ -1497,9 +1562,14 @@ def add_funding_arguments(parser):
         help="request an Esplora fee estimate for this block target",
     )
     parser.add_argument("--min-confirmations", type=int, default=1)
-    parser.add_argument("--include-utxo", action="append", default=[])
+    if include_utxo:
+        parser.add_argument("--include-utxo", action="append", default=[])
     parser.add_argument("--exclude-utxo", action="append", default=[])
-    parser.add_argument("--max-fee-sats", type=int)
+    parser.add_argument(
+        "--max-fee-sats",
+        type=int,
+        help="hard maximum total transaction fee in satoshis",
+    )
     parser.add_argument(
         "--cache-only",
         action="store_true",
@@ -1956,6 +2026,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="fund and sign but never broadcast",
     )
     p_send_to.set_defaults(func=cmd_sendtoaddress, parser=p_send_to)
+
+    # sendall
+    p_send_all = sub.add_parser(
+        "sendall",
+        help="spend all eligible wallet UTXOs to one address without change",
+    )
+    add_wallet_access_arguments(p_send_all)
+    p_send_all.add_argument(
+        "--to-address",
+        "--address",
+        dest="address",
+        required=True,
+        help="destination address",
+    )
+    p_send_all.add_argument(
+        "--password",
+        help="wallet password; hidden prompt is safer",
+    )
+    p_send_all.add_argument(
+        "--output-file",
+        help="save the signed transaction document here before broadcasting",
+    )
+    add_funding_arguments(p_send_all, include_utxo=False)
+    add_broadcast_confirmation_arguments(p_send_all)
+    p_send_all.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fund and sign but never broadcast",
+    )
+    p_send_all.set_defaults(func=cmd_sendall, parser=p_send_all)
 
     # shell
     p_shell = sub.add_parser(
