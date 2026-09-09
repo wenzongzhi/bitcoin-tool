@@ -14,6 +14,7 @@ You can use this tool to complete the following task
 - Create encrypted or plaintext BIP39 wallets with BIP44, BIP49, BIP84, and BIP86 accounts
 - Create isolated mainnet or Testnet4 wallets and addresses
 - Sync issued wallet addresses through an Esplora API and cache balance, UTXOs, and transactions
+- Query one transaction's confirmation state without synchronizing a wallet
 - Create, fund, sign, decode, broadcast, and sweep P2PKH/P2WPKH transactions
 - Start an interactive `bitcoin-tool shell` with command completion
 
@@ -184,6 +185,11 @@ $ python bitcoin_tool.py --network testnet4 syncwallet --wallet-name "testnet4_B
 $ python bitcoin_tool.py --network testnet4 getbalance --wallet-name "testnet4_BTC_01"
 $ python bitcoin_tool.py --network testnet4 listunspent --wallet-name "testnet4_BTC_01"
 $ python bitcoin_tool.py --network testnet4 listtransactions --wallet-name "testnet4_BTC_01"
+```
+
+- query one transaction's current confirmation state without scanning wallet addresses
+```bash
+$ python bitcoin_tool.py --network testnet4 gettransactionstatus --txid "<64-character-txid>"
 ```
 
 - sync through a self-hosted Esplora backend
