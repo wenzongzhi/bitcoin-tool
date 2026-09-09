@@ -479,6 +479,27 @@ def cmd_syncwallet(args):
     print("cache file         :", result["cache_file"])
 
 
+def cmd_gettransactionstatus(args):
+    """Print the current Esplora confirmation state for one TXID."""
+
+    try:
+        status = EsploraBackend(
+            args.backend_url,
+            args.timeout,
+            network=args.network,
+            retries=args.retries,
+        ).get_transaction_status(args.txid)
+    except EsploraError as exc:
+        _runtime_error(exc)
+
+    print("txid        :", args.txid.lower())
+    print("network     :", args.network)
+    print("confirmed   :", status["confirmed"])
+    print("block height:", status.get("block_height"))
+    print("block hash  :", status.get("block_hash"))
+    print("block time  :", status.get("block_time"))
+
+
 def cmd_getbalance(args):
     try:
         result = get_cached_balance(
@@ -1426,6 +1447,15 @@ class BitcoinToolShell(cmd.Cmd):
     def complete_syncwallet(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return self._complete_options("syncwallet", text)
 
+    def do_gettransactionstatus(self, argument_line: str) -> None:
+        """Query whether one transaction is confirmed."""
+        self._run_command("gettransactionstatus", argument_line)
+
+    def complete_gettransactionstatus(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> list[str]:
+        return self._complete_options("gettransactionstatus", text)
+
     def do_getbalance(self, argument_line: str) -> None:
         """Read wallet balance from the local cache."""
         self._run_command("getbalance", argument_line)
@@ -1889,6 +1919,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip transaction history and sync only address stats and UTXOs",
     )
     p_syncwallet.set_defaults(func=cmd_syncwallet, parser=p_syncwallet)
+
+    # gettransactionstatus
+    p_transaction_status = sub.add_parser(
+        "gettransactionstatus",
+        help="query whether one transaction is confirmed",
+    )
+    p_transaction_status.add_argument(
+        "--txid",
+        required=True,
+        help="64-character transaction ID",
+    )
+    add_backend_arguments(p_transaction_status)
+    p_transaction_status.set_defaults(
+        func=cmd_gettransactionstatus,
+        parser=p_transaction_status,
+    )
 
     # getbalance
     p_getbalance = sub.add_parser(
