@@ -18,6 +18,28 @@ You can use this tool to complete the following task
 - Create, fund, sign, decode, broadcast, and sweep P2PKH/P2WPKH transactions
 - Start an interactive `bitcoin-tool shell` with command completion
 
+## Platform API
+
+Applications should call the high-level services instead of parsing wallet JSON
+or coordinating transaction workflow modules themselves:
+
+```python
+from wallet.service import WalletService
+from tx.service import PaymentService
+
+wallets = WalletService(wallet_file, cache_file, network)
+payments = PaymentService(wallets)
+```
+
+`WalletService` owns wallet creation/import, metadata, receive-address
+discovery, synchronization, mnemonic access, rename, password change, and
+removal. `PaymentService` owns fee estimation and the complete
+prepare/sign/broadcast/cancel lifecycle, including UTXO reservation release and
+pending transaction accounting.
+
+The low-level `wallet` and `tx` modules remain implementation details and are
+unchanged by the Platform layer.
+
 ## Operating environment
 - Python version: 3.12.6, other versions should also work.
 - Install dependencies
@@ -110,6 +132,16 @@ Encrypted wallet creation does not print the mnemonic. Use the explicit command 
 ```bash
 $ python bitcoin_tool.py getmnemonic --wallet-name "my_BTC_01" --password "test-password"
 ```
+
+- manage the wallet lifecycle
+```bash
+$ python bitcoin_tool.py renamewallet --wallet-name "my_BTC_01" --new-name "savings" --password "test-password"
+$ python bitcoin_tool.py changewalletpassword --wallet-name "savings" --current-password "test-password" --new-password "new-password"
+$ python bitcoin_tool.py removewallet --wallet-name "savings" --password "new-password" --yes
+```
+
+`removewallet` deletes the selected wallet record and its cache entry from this
+data directory. Recovery words are required to restore it later.
 
 - convert BIP39 entropy hex to mnemonic words
 ```bash
