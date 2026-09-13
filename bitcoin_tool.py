@@ -70,6 +70,7 @@ from wallet import (
     sync_wallet,
     wallet_requires_password,
 )
+from wallet.service import WalletService as PlatformWalletService
 from tx import (
     TransactionError,
     broadcast_signed_transaction,
@@ -371,6 +372,58 @@ def cmd_getmnemonic(args):
     print("wallet name :", result["wallet_name"])
     print("network     :", args.network)
     print("mnemonic    :", result["mnemonic"])
+
+
+def _platform_wallet_service(args) -> PlatformWalletService:
+    """Build the high-level wallet API with the CLI's selected data paths."""
+
+    return PlatformWalletService(
+        default_wallet_file(args.datadir, args.network),
+        default_wallet_cache_file(args.datadir, args.network),
+        args.network,
+    )
+
+
+def cmd_renamewallet(args):
+    try:
+        state = _platform_wallet_service(args).rename_wallet(
+            args.wallet_name,
+            args.new_name,
+            args.password,
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+    print("old wallet name :", args.wallet_name)
+    print("new wallet name :", state.metadata.name)
+    print("network         :", state.metadata.network)
+
+
+def cmd_changewalletpassword(args):
+    try:
+        state = _platform_wallet_service(args).change_password(
+            args.wallet_name,
+            args.current_password,
+            args.new_password,
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+    print("wallet name :", state.metadata.name)
+    print("network     :", state.metadata.network)
+    print("encrypted   :", "yes" if state.metadata.encrypted else "no")
+
+
+def cmd_removewallet(args):
+    if not args.yes:
+        args.parser.error("removewallet requires --yes")
+    try:
+        _platform_wallet_service(args).remove_wallet(
+            args.wallet_name,
+            args.password,
+        )
+    except WalletError as exc:
+        args.parser.error(str(exc))
+    print("removed wallet :", args.wallet_name)
+    print("network        :", args.network)
 
 
 def cmd_rebuildaddressbook(args):
@@ -1419,6 +1472,27 @@ class BitcoinToolShell(cmd.Cmd):
     def complete_getmnemonic(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return self._complete_options("getmnemonic", text)
 
+    def do_renamewallet(self, argument_line: str) -> None:
+        """Rename a wallet and its matching cache entry."""
+        self._run_command("renamewallet", argument_line)
+
+    def complete_renamewallet(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("renamewallet", text)
+
+    def do_changewalletpassword(self, argument_line: str) -> None:
+        """Change a wallet encryption password."""
+        self._run_command("changewalletpassword", argument_line)
+
+    def complete_changewalletpassword(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("changewalletpassword", text)
+
+    def do_removewallet(self, argument_line: str) -> None:
+        """Remove a wallet and its matching cache entry."""
+        self._run_command("removewallet", argument_line)
+
+    def complete_removewallet(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return self._complete_options("removewallet", text)
+
     def do_rebuildaddressbook(self, argument_line: str) -> None:
         """Rebuild wallet address metadata."""
         self._run_command("rebuildaddressbook", argument_line)
@@ -1830,6 +1904,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="wallet data directory (overrides BITCOIN_TOOL_DATADIR)",
     )
     p_getmnemonic.set_defaults(func=cmd_getmnemonic, parser=p_getmnemonic)
+
+    # wallet lifecycle
+    p_renamewallet = sub.add_parser(
+        "renamewallet",
+        help="rename a wallet and its matching cache entry",
+    )
+    add_wallet_access_arguments(p_renamewallet)
+    p_renamewallet.add_argument("--new-name", required=True, help="new wallet name")
+    p_renamewallet.add_argument(
+        "--password",
+        help="password for an encrypted wallet",
+    )
+    p_renamewallet.set_defaults(func=cmd_renamewallet, parser=p_renamewallet)
+
+    p_change_password = sub.add_parser(
+        "changewalletpassword",
+        help="replace a wallet encryption password",
+    )
+    add_wallet_access_arguments(p_change_password)
+    p_change_password.add_argument(
+        "--current-password",
+        help="current password for an encrypted wallet",
+    )
+    p_change_password.add_argument(
+        "--new-password",
+        required=True,
+        help="new wallet encryption password",
+    )
+    p_change_password.set_defaults(
+        func=cmd_changewalletpassword,
+        parser=p_change_password,
+    )
+
+    p_removewallet = sub.add_parser(
+        "removewallet",
+        help="remove one wallet and its matching cache entry",
+    )
+    add_wallet_access_arguments(p_removewallet)
+    p_removewallet.add_argument(
+        "--password",
+        help="password for an encrypted wallet",
+    )
+    p_removewallet.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm permanent removal from this data directory",
+    )
+    p_removewallet.set_defaults(func=cmd_removewallet, parser=p_removewallet)
 
     # rebuildaddressbook
     p_rebuildaddressbook = sub.add_parser(
