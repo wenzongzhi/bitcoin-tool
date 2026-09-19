@@ -74,6 +74,7 @@ from wallet.service import WalletService as PlatformWalletService
 from tx import (
     TransactionError,
     broadcast_signed_transaction,
+    cancel_transaction_draft,
     create_raw_transaction,
     decode_transaction,
     deserialize_transaction_hex,
@@ -342,6 +343,7 @@ def cmd_getnewaddress(args):
             change=args.change,
             address_type=args.address_type,
             network=args.network,
+            cache_file=default_wallet_cache_file(args.datadir, args.network),
         )
     except WalletError as exc:
         args.parser.error(str(exc))
@@ -529,6 +531,9 @@ def cmd_syncwallet(args):
     print("confirmed balance  :", balance["confirmed"], "sats", f"({_format_btc(balance['confirmed'])})")
     print("unconfirmed balance:", balance["unconfirmed"], "sats", f"({_format_btc(balance['unconfirmed'])})")
     print("total balance      :", balance["total"], "sats", f"({_format_btc(balance['total'])})")
+    print("pending delta      :", balance["pending_delta"], "sats", f"({_format_btc(balance['pending_delta'])})")
+    print("effective balance  :", balance["effective"], "sats", f"({_format_btc(balance['effective'])})")
+    print("available balance  :", balance["available"], "sats", f"({_format_btc(balance['available'])})")
     print("cache file         :", result["cache_file"])
 
 
@@ -571,6 +576,9 @@ def cmd_getbalance(args):
     print("confirmed balance  :", balance["confirmed"], "sats", f"({_format_btc(balance['confirmed'])})")
     print("unconfirmed balance:", balance["unconfirmed"], "sats", f"({_format_btc(balance['unconfirmed'])})")
     print("total balance      :", balance["total"], "sats", f"({_format_btc(balance['total'])})")
+    print("pending delta      :", balance["pending_delta"], "sats", f"({_format_btc(balance['pending_delta'])})")
+    print("effective balance  :", balance["effective"], "sats", f"({_format_btc(balance['effective'])})")
+    print("available balance  :", balance["available"], "sats", f"({_format_btc(balance['available'])})")
     print("cache file         :", result["cache_file"])
 
 
@@ -819,6 +827,27 @@ def cmd_fundrawtransaction(args):
     print("change address        :", change["address"] if change else "none")
     print("change output position:", document["change_position"])
     print("output file           :", output_file.resolve())
+
+
+def cmd_canceltransactiondraft(args):
+    """Explicitly close the wallet's active payment draft."""
+
+    try:
+        cancelled = cancel_transaction_draft(
+            default_wallet_cache_file(args.datadir, args.network),
+            args.draft_id,
+            args.wallet_name,
+        )
+    except TransactionError as exc:
+        _runtime_error(exc)
+    if not cancelled:
+        args.parser.error(
+            f'payment draft "{args.draft_id}" is not active for wallet '
+            f'"{args.wallet_name}"'
+        )
+    print("cancelled draft:", args.draft_id)
+    print("wallet         :", args.wallet_name)
+    print("network        :", args.network)
 
 
 def _wallet_signing_password(args, wallet_file: Path) -> str | None:
@@ -1565,6 +1594,15 @@ class BitcoinToolShell(cmd.Cmd):
     def complete_fundrawtransaction(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return self._complete_options("fundrawtransaction", text)
 
+    def do_canceltransactiondraft(self, argument_line: str) -> None:
+        """Cancel one active RESERVED or ISSUED payment draft."""
+        self._run_command("canceltransactiondraft", argument_line)
+
+    def complete_canceltransactiondraft(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> list[str]:
+        return self._complete_options("canceltransactiondraft", text)
+
     def do_signrawtransactionwithwallet(self, argument_line: str) -> None:
         """Sign a funded transaction with wallet keys."""
         self._run_command("signrawtransactionwithwallet", argument_line)
@@ -2133,6 +2171,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_funding_arguments(p_fund_raw)
     p_fund_raw.add_argument("--output-file", help="funded transaction JSON output path")
     p_fund_raw.set_defaults(func=cmd_fundrawtransaction, parser=p_fund_raw)
+
+    # canceltransactiondraft
+    p_cancel_draft = sub.add_parser(
+        "canceltransactiondraft",
+        help="cancel the wallet's active payment draft",
+    )
+    add_wallet_access_arguments(p_cancel_draft)
+    p_cancel_draft.add_argument("--draft-id", required=True)
+    p_cancel_draft.set_defaults(
+        func=cmd_canceltransactiondraft,
+        parser=p_cancel_draft,
+    )
 
     # signrawtransactionwithwallet
     p_sign_raw = sub.add_parser(
