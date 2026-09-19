@@ -37,8 +37,47 @@ removal. `PaymentService` owns fee estimation and the complete
 prepare/sign/broadcast/cancel lifecycle, including UTXO reservation release and
 pending transaction accounting.
 
-The low-level `wallet` and `tx` modules remain implementation details and are
-unchanged by the Platform layer.
+The low-level `wallet`, `tx`, and `network` modules remain implementation
+details. Platform clients should not parse their JSON files directly.
+
+### Correctness model
+
+- `EsploraBackend.get_all_address_transactions(address)` retains the first
+  page's mempool entries and follows confirmed `/txs/chain/:last_seen_txid`
+  pages until the backend returns an empty page. Invalid pages, cursor loops,
+  request failures, and the pagination safety bound produce explicit errors.
+- Imported wallets use a gap limit of 20 independently for receive and change
+  branches. Discovery makes only the lightweight address-summary request and
+  considers an address used when either `chain_stats.tx_count` or
+  `mempool_stats.tx_count` is nonzero. After both branches finish, it records
+  history only through each branch's last used index, issues the next receive
+  address, and runs the normal wallet synchronization for UTXOs, balance, and
+  transaction history. The default defensive bound is 10,000 addresses per
+  branch. `import_scan_size` remains a compatibility alias for the new
+  `gap_limit` constructor option.
+- Each wallet supports at most one payment draft at a time. Change-address
+  state is inferred rather than stored in `wallets.json`: an index below
+  `next_change_index` is `ISSUED`; the current index is `AVAILABLE`, or
+  `RESERVED` when the cache's optional `reserved_change` object names it.
+  Preparation reserves the candidate without advancing the index. Cancel,
+  prepare failure, or sign failure releases it; successful signing advances the
+  index permanently. Broadcast is not part of address issuance. Reservations
+  survive restart and never expire implicitly.
+- `WalletState` exposes `authoritative_balance_sats`,
+  `confirmed_balance_sats`, `unconfirmed_chain_balance_sats`,
+  `pending_delta_sats`, `effective_balance_sats`, and
+  `available_balance_sats`. The legacy `balance_sats` property returns the
+  effective balance.
+
+Balance meanings:
+
+- authoritative: latest chain-derived confirmed plus unconfirmed UTXOs;
+- pending delta: locally broadcast wallet delta not yet observed by Esplora;
+- effective: authoritative plus that unapplied pending delta;
+- available: confirmed UTXOs excluding active reservations and pending spends.
+
+Unconfirmed incoming outputs contribute to effective balance after the backend
+reports them, but are not included in available balance.
 
 ## Operating environment
 - Python version: 3.12.6, other versions should also work.
@@ -262,7 +301,16 @@ Fund the template from the wallet's confirmed UTXO cache. By default this synchr
 $ python bitcoin_tool.py --network testnet4 fundrawtransaction --wallet-name "testnet4_BTC_01" --raw-tx-hex "<unsigned-hex>" --address-type p2wpkh --fee-rate-sat-vb 2 --max-fee-sats 5000
 ```
 
-The command writes a versioned funded JSON document containing the unsigned transaction and its prevout metadata. Selected UTXOs are temporarily reserved, and an issued change index is never rolled back or reused.
+The command writes a versioned funded JSON document containing the unsigned transaction and its prevout metadata. Selected UTXOs and the candidate change address enter `RESERVED`. A wallet rejects another prepare operation until this draft is signed and then broadcast/cancelled, or explicitly cancelled before signing. The cache stores at most one minimal `reserved_change` record; it does not duplicate the wallet's address book or persist a separate lifecycle-state string.
+
+Cancel a prepared or signed draft by its saved draft ID. Cancelling a
+`RESERVED` draft makes its candidate change address available again. Cancelling
+after successful signing closes the payment but does not reclaim its `ISSUED`
+change address:
+
+```bash
+$ python bitcoin_tool.py --network testnet4 canceltransactiondraft --wallet-name "testnet4_BTC_01" --draft-id "<draft-id>"
+```
 
 Sign and locally verify the funded document. Encrypted wallets prompt for the password without echoing it:
 
@@ -302,7 +350,7 @@ Use `--confirmation-target 6` instead of `--fee-rate-sat-vb` to use the Esplora 
 
 Transient Esplora GET failures are retried twice by default with exponential backoff. Use `--retries N` to change this. Increasing `--timeout` does not fix a server that actively closes the connection. If the default Testnet4 service is unreachable from your network, select another trusted Testnet4 Esplora instance with `--backend-url`; the tool verifies its genesis block before reading wallet data or broadcasting.
 
-Add `--dry-run` to `sendtoaddress` or `sendall` to synchronize, fund, sign, and save the result without broadcasting. `sendtoaddress` permanently issues any required change address; `sendall` never creates change.
+Add `--dry-run` to `sendtoaddress` or `sendall` to synchronize, fund, sign, and save the result without broadcasting. Successful signing has already made any change address `ISSUED`; it is never reusable even if the signed transaction is later cancelled or never broadcast. The signed draft remains active until broadcast or `canceltransactiondraft`. `sendall` never creates change and still follows the one-active-draft rule.
 
 The same transaction commands support mainnet when `--network` is omitted. Broadcasting on mainnet is blocked unless that invocation includes `--allow-mainnet`; an interactive `yes` confirmation is still required unless `--yes` is also supplied. Review the saved signed JSON with an independent decoder before broadcasting.
 
@@ -354,11 +402,22 @@ Testnet4 uses the same account structure with paths `m/44'/1'/0'`, `m/49'/1'/0'`
 
 Each account owns its account xpub, receiving/change indexes, and `issued_addresses`. The account xpub cannot spend coins, but it reveals every receiving and change address in that account. Keep it private unless you intentionally need a watch-only setup.
 
+The change-address lifecycle does not alter the wallet format. Version 3 keeps
+the same account and `issued_addresses` structure and stores no
+`AVAILABLE`/`RESERVED`/`ISSUED` status field. Those states are inferred from
+`next_change_index` together with the cache reservation described below.
+
 Wallet format versions 1 and 2 are rejected. There is no automatic migration: recreate the wallet from its mnemonic to obtain the version 3 structure. Wallet cache version 1 is also rejected; remove the old `wallet_cache.json` and run `syncwallet` to create a fresh cache.
 
-`syncwallet` reads issued addresses from every account in `wallets.json`, queries an Esplora-compatible backend, and writes public chain state into `wallet_cache.json` in the same data directory. Cached addresses and UTXOs retain their `account_id` and `address_type`. `getbalance`, `listunspent`, and `listtransactions` read only this cache and do not perform network requests.
+Wallet cache version 2 also keeps its existing schema. While a transaction is
+being prepared, its wallet entry may contain one optional `reserved_change`
+object with only `draft_id`, `address_type`, `index`, and `reserved_at`.
+Synchronization preserves that object; cancel and failures remove it, and a
+successful signing removes it after advancing `next_change_index`.
 
-Only addresses already created by `getnewaddress` are synced. If you used addresses outside this tool's issued address book, create or rebuild the address records first.
+`syncwallet` reads tracked addresses from every account in `wallets.json`, queries an Esplora-compatible backend, follows every confirmed-history page, and writes public chain state into `wallet_cache.json` in the same data directory. Imported wallets first perform lightweight discovery independently on receive and change branches until 20 consecutive unused addresses are found; discovery reads only each address summary's chain and mempool transaction counts. The following normal sync fetches the UTXOs and transactions and derives balance from the UTXO sum. Cached addresses and UTXOs retain their `account_id` and `address_type`. `getbalance`, `listunspent`, and `listtransactions` read only this cache and do not perform network requests.
+
+Newly created wallets sync their issued address book. Imported wallets rebuild the minimal historical address book from account xpubs with gap-limit discovery, issue the next receive address, and then use the same sync path, so historical addresses do not need to be manually recreated.
 
 The mainnet default sync backend is Blockstream's public Esplora API at `https://blockstream.info/api`. The Testnet4 default is `https://mempool.space/testnet4/api`. Before querying wallet addresses, `syncwallet` verifies the backend's genesis block against the selected network. Querying a public backend reveals the wallet addresses you ask about to that backend. For better privacy, use `--backend-url` with a trusted or self-hosted Esplora server.
 
