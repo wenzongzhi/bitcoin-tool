@@ -16,5 +16,3 @@ build/
 /settings.json.lock
 /*.json
 /*.exe
-tests/
-auto_test/
