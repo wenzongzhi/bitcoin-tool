@@ -37,8 +37,30 @@ removal. `PaymentService` owns fee estimation and the complete
 prepare/sign/broadcast/cancel lifecycle, including UTXO reservation release and
 pending transaction accounting.
 
+Creation and import are separate contracts. `create_wallet()` returns
+`WalletCreationResult.generated_mnemonic` exactly once for product backup UI;
+`import_wallet()` always returns `generated_mnemonic=None` and never sends the
+caller-provided recovery words back through result objects. Import validates,
+persists, discovers, and initially synchronizes as one failure-atomic Platform
+operation: caught failures roll back the new record and cache entry.
+`WalletImportCleanupError` explicitly reports the exceptional case where that
+compensating cleanup may be incomplete. This is not a cross-file ACID or
+power-loss transaction.
+
+`wallets.json` is authoritative for wallet identity, names, keys, and address
+lifecycle. `wallet_cache.json` is non-authoritative and rebuildable; it cannot
+create or restore a wallet, or override authoritative wallet identity. Because
+it can also hold transient payment reservations and pending summaries, cache
+maintenance isolates stale entries instead of deleting unrelated wallets'
+operational state. Rename and remove remain successful once their authoritative
+write has completed, even if follow-up cache maintenance emits
+`WalletCacheWarning`.
+
 The low-level `wallet`, `tx`, and `network` modules remain implementation
-details. Platform clients should not parse their JSON files directly.
+details. Platform clients should use `WalletService` and `PaymentService`; they
+must not parse JSON storage, mutate reservations, or import workflow internals
+directly. This service boundary is considered frozen after Step 2A unless a new
+Bitcoin core capability requires an explicit API addition.
 
 ### Correctness model
 
