@@ -88,6 +88,15 @@ from tx import (
     validate_signed_document,
 )
 from tx.builder import parse_outpoint, parse_output_spec
+from single_key_wallet import (
+    SingleKeyWalletError,
+    SingleKeyWalletService,
+    SPEND_ADDRESS_TYPES as SINGLE_KEY_SPEND_TYPES,
+    SYNC_ADDRESS_TYPES as SINGLE_KEY_SYNC_TYPES,
+    default_single_key_wallet_file,
+    default_single_key_cache_file,
+)
+from single_key_wallet.storage import write_json as write_single_key_json, read_json as read_single_key_json
 
 try:
     from prompt_toolkit import PromptSession
@@ -1121,6 +1130,135 @@ def cmd_sendall(args):
         print("cache warning     :", result["cache_warning"], file=sys.stderr)
 
 
+def _single_key_service(args):
+    return SingleKeyWalletService(
+        default_single_key_wallet_file(args.datadir, args.network),
+        default_single_key_cache_file(args.datadir, args.network),
+        args.network,
+        backend_factory=lambda network: EsploraBackend(
+            getattr(args, "backend_url", None), getattr(args, "timeout", 20),
+            network=network, retries=getattr(args, "retries", 2),
+        ),
+    )
+
+
+def _single_key_password(args, service):
+    password = getattr(args, "password", None)
+    if password is not None:
+        print("warning: command-line secrets may be visible in shell history/process listings", file=sys.stderr)
+        return password
+    if service.get_wallet_state(args.wallet_name)["encrypted"]:
+        return getpass.getpass("wallet password: ")
+    return None
+
+
+def cmd_singlekey(args):
+    service = _single_key_service(args)
+    action = args.cmd.removeprefix("singlekey-")
+    try:
+        if action in ("createwallet", "importkey"):
+            if args.password is None:
+                print("warning: unencrypted private keys are dangerous; for experiments only", file=sys.stderr)
+            else:
+                print("warning: command-line secrets may be visible in shell history/process listings", file=sys.stderr)
+            if action == "createwallet":
+                result = service.create_wallet(args.wallet_name, args.password)
+            elif args.private_key_hex is not None:
+                print("warning: command-line secrets may be visible in shell history/process listings", file=sys.stderr)
+                result = service.import_private_key_hex(args.wallet_name, args.private_key_hex, args.password)
+            else:
+                print("warning: command-line secrets may be visible in shell history/process listings", file=sys.stderr)
+                result = service.import_private_key_wif(args.wallet_name, args.wif, args.password)
+        elif action == "listwallets":
+            result = service.list_wallets()
+        elif action == "getaddresses":
+            addresses = service.get_addresses(args.wallet_name)
+            for kind, value in addresses.items():
+                print(f"{kind}: {value['address']}")
+                print("  scriptPubKey:", value["script_pubkey"])
+                print("  sync: yes; receive:", "yes" if value["receive_supported"] else "no",
+                      "; spend:", "yes" if value["spend_supported"] else "spending not yet supported")
+            return
+        elif action == "getaddress":
+            result = service.get_receive_address(args.wallet_name, args.address_type)
+        elif action == "syncwallet":
+            result = service.sync_wallet(args.wallet_name)
+        elif action == "getbalance":
+            result = service.get_balance(args.wallet_name)
+        elif action == "listunspent":
+            result = service.list_unspent(args.wallet_name, args.address_type, args.min_confirmations)
+        elif action == "listtransactions":
+            result = service.list_transactions(args.wallet_name, args.limit)
+        elif action == "changepassword":
+            result = service.change_password(args.wallet_name, _single_key_password(args, service),
+                                             None if args.remove_encryption else args.new_password)
+            if args.remove_encryption:
+                print("warning: unencrypted private keys are dangerous; for experiments only", file=sys.stderr)
+        elif action == "removewallet":
+            password = _single_key_password(args, service)
+            if not args.yes and input('Remove this single-key wallet? Type "yes": ').strip() != "yes":
+                raise SingleKeyWalletError("wallet removal cancelled")
+            service.remove_wallet(args.wallet_name, password)
+            result = {"removed": args.wallet_name}
+        elif action == "canceldraft":
+            service.cancel_send(args.wallet_name, args.operation_id)
+            result = {"cancelled": args.operation_id}
+        elif action in ("send", "broadcast"):
+            if args.network == NETWORK_MAINNET and not args.dry_run and not args.allow_mainnet:
+                raise SingleKeyWalletError("mainnet broadcasting is disabled unless --allow-mainnet is supplied")
+            if action == "send":
+                if args.output_file:
+                    requested_file = Path(args.output_file).expanduser().resolve()
+                    if requested_file in (service.wallet_file.resolve(), service.cache_file.resolve()):
+                        raise SingleKeyWalletError("signed output file must not overwrite wallet or cache data")
+                document = service.prepare_send(
+                    args.wallet_name, args.from_address_type, args.to, args.fee_rate_sat_vb,
+                    amount_sats=args.amount_sats, send_all=args.all,
+                    password=_single_key_password(args, service), synchronize=not args.cache_only,
+                    min_confirmations=args.min_confirmations, max_fee_sats=args.max_fee_sats,
+                    max_cache_age_seconds=args.max_cache_age_seconds,
+                )
+                output_file = Path(args.output_file) if args.output_file else Path.cwd() / f"singlekey-signed-{document['operation_id']}.json"
+                try:
+                    write_single_key_json(output_file, document)
+                except SingleKeyWalletError:
+                    service.cancel_send(args.wallet_name, document["operation_id"])
+                    raise
+                print("signed transaction:", output_file.resolve())
+            else:
+                document = service.validate_send(read_single_key_json(Path(args.transaction_file), {}))
+                if document["wallet_name"] != args.wallet_name:
+                    raise SingleKeyWalletError("transaction wallet name does not match CLI wallet")
+            for label, field in (
+                ("wallet name", "wallet_name"), ("network", "network"),
+                ("source address type", "source_address_type"), ("source address", "source_address"),
+                ("destination", "destination"), ("send mode", "send_mode"),
+                ("input total sats", "input_total_sats"), ("destination sats", "destination_amount_sats"),
+                ("change sats", "change_amount_sats"), ("fee sats", "fee_sats"),
+                ("fee rate sat/vB", "fee_rate_sat_vb"), ("input count", "input_count"),
+                ("operation id", "operation_id"),
+            ):
+                print(f"{label}: {document[field]}")
+            if args.dry_run:
+                print("dry run: transaction was not broadcast")
+                return
+            try:
+                _confirm_broadcast(args, document["txid"], service.backend_factory(args.network).base_url)
+            except (TransactionError, EOFError, KeyboardInterrupt):
+                service.cancel_send(args.wallet_name, document["operation_id"])
+                raise SingleKeyWalletError("broadcast cancelled")
+            result = service.broadcast(document, allow_mainnet=args.allow_mainnet)
+            print("broadcast accepted:", result["txid"])
+            if result.get("cache_warning"):
+                print("cache warning:", result["cache_warning"], file=sys.stderr)
+            return
+        else:
+            raise SingleKeyWalletError("unknown single-key command")
+    except (SingleKeyWalletError, EsploraError, EOFError) as exc:
+        _runtime_error(exc)
+    print(json.dumps(result, indent=2))
+
+
 SHELL_BUILTIN_COMMANDS = {
     "exit": "Exit the interactive shell.",
     "quit": "Exit the interactive shell.",
@@ -1393,9 +1531,24 @@ class BitcoinToolShell(cmd.Cmd):
             self.prompt = f"bitcoin-tool[{network}]> "
 
     def __getattr__(self, name: str):
+        if name.startswith("do_singlekey-"):
+            command = name.removeprefix("do_")
+            if command in _shell_completion_index()[0]:
+                return lambda argument_line: self._run_command(command, argument_line)
+        if name.startswith("complete_singlekey-"):
+            command = name.removeprefix("complete_")
+            if command in _shell_completion_index()[0]:
+                return lambda text, line, begidx, endidx: self._complete_options(command, text)
         if name.startswith(("do_", "complete_")) and "-" in name:
             return object.__getattribute__(self, name.replace("-", "_"))
         raise AttributeError(name)
+
+    def parseline(self, line: str):
+        stripped = line.strip()
+        if stripped.startswith("singlekey-"):
+            parts = stripped.split(maxsplit=1)
+            return parts[0], parts[1] if len(parts) == 2 else "", stripped
+        return super().parseline(line)
 
     def emptyline(self) -> None:
         # cmd.Cmd normally repeats the previous command on an empty line.
@@ -2274,6 +2427,71 @@ def build_parser() -> argparse.ArgumentParser:
         help="fund and sign but never broadcast",
     )
     p_send_all.set_defaults(func=cmd_sendall, parser=p_send_all)
+
+    # Independent fixed-key wallet commands; --network retains global CLI syntax.
+    singlekey_help = {
+        "createwallet": "generate an isolated single-key wallet",
+        "importkey": "import a HEX or WIF private key into an isolated wallet",
+        "listwallets": "list single-key wallets without secrets",
+        "getaddresses": "show all five single-key addresses and capabilities",
+        "getaddress": "show the fixed default or selected receiving address",
+        "syncwallet": "sync all five single-key addresses through Esplora",
+        "getbalance": "show detected and spend-supported cached balances",
+        "listunspent": "list single-key UTXOs and spending capabilities",
+        "listtransactions": "list deduplicated single-key transaction history",
+        "send": "fund, sign, and broadcast an amount or all of one source type",
+        "broadcast": "broadcast a saved single-key signed transaction",
+        "changepassword": "change single-key wallet encryption",
+        "removewallet": "remove a single-key wallet and its cache",
+        "canceldraft": "release a single-key draft that has not been broadcast",
+    }
+    for action, help_text in singlekey_help.items():
+        p_single = sub.add_parser(f"singlekey-{action}", help=help_text)
+        if action == "listwallets":
+            p_single.add_argument("--datadir", help="wallet data directory")
+        else:
+            add_wallet_access_arguments(p_single)
+        if action in ("createwallet", "importkey", "send", "changepassword", "removewallet"):
+            p_single.add_argument("--password", help="wallet password; hidden prompt is used for encrypted sends")
+        if action == "importkey":
+            key_input = p_single.add_mutually_exclusive_group(required=True)
+            key_input.add_argument("--private-key-hex", help="64-character raw private key hex")
+            key_input.add_argument("--wif", help="WIF private key for the selected network")
+        if action in ("getaddress", "listunspent"):
+            p_single.add_argument("--address-type", choices=SINGLE_KEY_SPEND_TYPES if action == "getaddress" else SINGLE_KEY_SYNC_TYPES)
+        if action == "listunspent":
+            p_single.add_argument("--min-confirmations", type=int, default=0)
+        if action == "listtransactions":
+            p_single.add_argument("--limit", type=int, default=20)
+        if action in ("syncwallet", "send", "broadcast"):
+            add_backend_arguments(p_single)
+        if action == "send":
+            p_single.add_argument("--from-address-type", choices=SINGLE_KEY_SPEND_TYPES, required=True)
+            p_single.add_argument("--to", required=True, help="destination address")
+            amount_mode = p_single.add_mutually_exclusive_group(required=True)
+            amount_mode.add_argument("--amount-sats", type=int)
+            amount_mode.add_argument("--all", action="store_true")
+            p_single.add_argument("--fee-rate-sat-vb", required=True)
+            p_single.add_argument("--min-confirmations", type=int, default=1)
+            p_single.add_argument("--max-fee-sats", type=int)
+            p_single.add_argument("--cache-only", action="store_true")
+            p_single.add_argument("--max-cache-age-seconds", type=int, default=300)
+            p_single.add_argument("--output-file")
+            p_single.add_argument("--dry-run", action="store_true")
+            add_broadcast_confirmation_arguments(p_single)
+        if action == "broadcast":
+            p_single.add_argument("--transaction-file", required=True)
+            add_broadcast_confirmation_arguments(p_single)
+            p_single.set_defaults(dry_run=False)
+        if action == "changepassword":
+            new_secret = p_single.add_mutually_exclusive_group(required=True)
+            new_secret.add_argument("--new-password")
+            new_secret.add_argument("--remove-encryption", action="store_true")
+        if action == "removewallet":
+            p_single.add_argument("--yes", action="store_true")
+        if action == "canceldraft":
+            p_single.add_argument("--operation-id", required=True)
+        p_single.set_defaults(func=cmd_singlekey, parser=p_single)
 
     # shell
     p_shell = sub.add_parser(
